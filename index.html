@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>팀 편성 관리 (조합 기반)</title>
+<title>FS SIMPLE</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Pretendard', -apple-system, sans-serif; background: #f5f6f8; color: #222; padding: 24px; }
@@ -16,6 +16,7 @@
   .form-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
   input, select, button { padding: 8px 12px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 14px; font-family: inherit; }
   input { flex: 1; min-width: 100px; }
+  input.score { max-width: 90px; flex: none; text-align: center; font-weight: 600; }
   button { background: #2563eb; color: #fff; border: none; cursor: pointer; }
   button:hover { background: #1d4ed8; }
   button.danger { background: #dc2626; }
@@ -37,17 +38,18 @@
   .chip.selected { background: #ede9fe; border-color: #7c3aed; color: #5b21b6; }
   .team-box { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
   .team-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-  .winner { background: #ecfdf5; padding: 2px 6px; border-radius: 4px; color: #047857; font-size: 12px; }
+  .score-display { font-size: 16px; font-weight: 700; color: #2563eb; padding: 2px 8px; background: #eff6ff; border-radius: 4px; }
   .bar { background: #e5e7eb; height: 8px; border-radius: 4px; overflow: hidden; margin: 4px 0; }
   .bar > div { height: 100%; background: #2563eb; }
   .hint { color: #6b7280; font-size: 12px; margin-bottom: 10px; }
   .pos { color: #047857; font-weight: 600; }
   .neg { color: #b91c1c; font-weight: 600; }
+  .vs-divider { font-size: 18px; color: #9ca3af; padding: 0 4px; }
 </style>
 </head>
 <body>
 
-<h1>팀 편성 관리 · 조합 기반</h1>
+<h1>팀 편성 관리 · 점수 기반</h1>
 
 <div class="tabs">
   <button class="tab active" data-tab="members">팀원 관리</button>
@@ -107,8 +109,10 @@
   <div class="hint">팀원 클릭으로 A/B팀 배정 (현재 모드: <strong id="sel-mode">A</strong>)</div>
   <div class="pick-list" id="pick-list"></div>
   <div class="form-row">
-    <span>승자:</span>
-    <select id="r-winner"><option value="A">A팀</option><option value="B">B팀</option><option value="draw">무승부</option></select>
+    <span>점수:</span>
+    <input id="r-scoreA" type="number" class="score" placeholder="A팀" min="0">
+    <span class="vs-divider">:</span>
+    <input id="r-scoreB" type="number" class="score" placeholder="B팀" min="0">
     <button onclick="addMatch()">경기 결과 저장</button>
   </div>
   <h2>경기 기록</h2>
@@ -117,12 +121,12 @@
 
 <!-- 4. 조합 분석 -->
 <div class="panel" id="combos">
-  <h2>같은 팀 조합 승률 (시너지)</h2>
-  <div class="hint">두 명이 같은 팀이었을 때 그 팀의 승률 · 2경기 이상만 표시 · 승률 높은 순</div>
+  <h2>같은 팀 조합 (시너지)</h2>
+  <div class="hint">2경기 이상 함께 뛴 페어 · 승률 + 평균 득실차</div>
   <div class="scroll-x"><table id="syn-table"></table></div>
 
   <h2 style="margin-top:20px;">맞대결 전적</h2>
-  <div class="hint">A vs B로 만났을 때 왼쪽 선수 기준 승률</div>
+  <div class="hint">2경기 이상 맞붙은 페어 · 왼쪽 선수 기준 승률 + 평균 점수차</div>
   <div class="scroll-x"><table id="vs-table"></table></div>
 </div>
 
@@ -135,8 +139,8 @@
     <span class="hint" style="margin:0;">선택한 인원을 2팀으로 분할 (인원차 0~1명)</span>
   </div>
   <p class="hint">
-    가능한 모든 분할을 평가하여 <strong>맞대결 예상 승률이 50%에 가장 가까운 조합</strong>을 선택합니다.
-    (17명 이상은 swap 휴리스틱 사용) 데이터가 없는 페어는 50%로 가정합니다.
+    맞대결 예상 승률과 예상 점수차를 함께 고려해 가장 균형 잡힌 분할을 찾습니다.
+    (17명 이상은 swap 휴리스틱) 데이터가 없는 페어는 50%, 0점차로 가정합니다.
   </p>
   <div id="bal-result"></div>
 </div>
@@ -153,6 +157,18 @@ const save = () => { Object.keys(state).forEach(k => localStorage.setItem(k, JSO
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const findName = id => (state.members.find(m => m.id === id) || {}).name || '?';
 const pairKey = (a,b) => a < b ? a+'|'+b : b+'|'+a;
+
+// 경기에서 A입장 결과 추출 (점수 우선, 없으면 legacy winner 필드)
+function matchOutcomeA(m) {
+  if (m.scoreA != null && m.scoreB != null) {
+    const diff = m.scoreA - m.scoreB;
+    const s = diff > 0 ? 1 : diff < 0 ? 0 : 0.5;
+    return { score: s, diff };
+  }
+  // legacy
+  const s = m.winner === 'A' ? 1 : m.winner === 'draw' ? 0.5 : 0;
+  return { score: s, diff: 0 };
+}
 
 document.querySelectorAll('.tab').forEach(btn => {
   btn.onclick = () => {
@@ -171,7 +187,7 @@ function addMember() {
   const name = document.getElementById('m-name').value.trim();
   const gender = document.getElementById('m-gender').value;
   const age = parseInt(document.getElementById('m-age').value);
-  if (!name || !age) { alert('이름과 나이를 입력하세요.'); return; }
+  if (!name || !age) return alert('이름과 나이를 입력하세요.');
   state.members.push({ id: uid(), name, gender, age });
   document.getElementById('m-name').value = '';
   document.getElementById('m-age').value = '';
@@ -254,7 +270,12 @@ function renderEvents() {
 let selMode = 'A';
 const selA = new Set(), selB = new Set();
 function setSelMode(m) { selMode = m; document.getElementById('sel-mode').textContent = m; }
-function clearSel() { selA.clear(); selB.clear(); renderPickList(); }
+function clearSel() {
+  selA.clear(); selB.clear();
+  document.getElementById('r-scoreA').value = '';
+  document.getElementById('r-scoreB').value = '';
+  renderPickList();
+}
 function togglePick(id) {
   if (selA.has(id)) selA.delete(id);
   else if (selB.has(id)) selB.delete(id);
@@ -272,10 +293,16 @@ function renderPickList() {
 }
 function addMatch() {
   const date = document.getElementById('r-date').value;
-  const winner = document.getElementById('r-winner').value;
+  const sA = document.getElementById('r-scoreA').value;
+  const sB = document.getElementById('r-scoreB').value;
   if (!date) return alert('날짜를 입력하세요.');
   if (selA.size === 0 || selB.size === 0) return alert('A팀, B팀 모두 선택하세요.');
-  state.matches.push({ id: uid(), date, teamA: [...selA], teamB: [...selB], winner });
+  if (sA === '' || sB === '') return alert('A팀과 B팀 점수를 모두 입력하세요.');
+  const scoreA = parseInt(sA), scoreB = parseInt(sB);
+  if (isNaN(scoreA) || isNaN(scoreB) || scoreA < 0 || scoreB < 0) return alert('점수는 0 이상의 숫자여야 합니다.');
+  state.matches.push({
+    id: uid(), date, teamA: [...selA], teamB: [...selB], scoreA, scoreB
+  });
   state.matches.sort((a,b) => b.date.localeCompare(a.date));
   clearSel(); save(); renderMatches();
 }
@@ -289,10 +316,21 @@ function renderMatches() {
   if (state.matches.length === 0) { list.innerHTML = `<div class="empty">등록된 경기가 없습니다.</div>`; return; }
   list.innerHTML = state.matches.map(m => {
     const a = m.teamA.map(findName).join(', '), b = m.teamB.map(findName).join(', ');
-    const wTxt = m.winner === 'A' ? 'A팀 승' : m.winner === 'B' ? 'B팀 승' : '무승부';
+    const hasScore = m.scoreA != null && m.scoreB != null;
+    const scoreHTML = hasScore
+      ? `<span class="score-display">${m.scoreA}</span><span class="vs-divider">:</span><span class="score-display">${m.scoreB}</span>`
+      : `<span style="color:#6b7280; font-size:12px;">${m.winner==='A'?'A승':m.winner==='B'?'B승':'무'}</span>`;
+    const diff = hasScore ? Math.abs(m.scoreA - m.scoreB) : 0;
+    const winLabel = hasScore
+      ? (m.scoreA > m.scoreB ? `A팀 ${diff}점차 승` : m.scoreA < m.scoreB ? `B팀 ${diff}점차 승` : '무승부')
+      : '';
     return `<div class="team-box">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-        <div><strong>${m.date}</strong> <span class="winner">${wTxt}</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px; gap:8px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+          <strong>${m.date}</strong>
+          ${scoreHTML}
+          <span style="color:#047857; font-size:12px;">${winLabel}</span>
+        </div>
         <button class="danger" onclick="delMatch('${m.id}')">삭제</button></div>
       <div style="font-size:13px;"><strong>A팀:</strong> ${a}</div>
       <div style="font-size:13px;"><strong>B팀:</strong> ${b}</div></div>`;
@@ -301,25 +339,26 @@ function renderMatches() {
 
 // === 조합 통계 ===
 function calcCombos() {
-  const together = {}; // pairKey -> {games, score}
-  const versus = {};   // a -> b -> {games, score(a입장)}
+  const together = {}; // pairKey -> {games, score, diffSum}
+  const versus = {};   // a -> b -> {games, score(a기준), diffSum(a기준)}
   state.matches.forEach(m => {
-    const sA = m.winner === 'A' ? 1 : m.winner === 'draw' ? 0.5 : 0;
-    const sB = 1 - sA;
-    [[m.teamA, sA], [m.teamB, sB]].forEach(([team, s]) => {
+    const o = matchOutcomeA(m);
+    const sA = o.score, sB = 1 - sA;
+    const dA = o.diff, dB = -o.diff;
+    [[m.teamA, sA, dA], [m.teamB, sB, dB]].forEach(([team, s, d]) => {
       for (let i = 0; i < team.length; i++) for (let j = i+1; j < team.length; j++) {
         const k = pairKey(team[i], team[j]);
-        together[k] = together[k] || { games: 0, score: 0 };
-        together[k].games++; together[k].score += s;
+        together[k] = together[k] || { games: 0, score: 0, diffSum: 0 };
+        together[k].games++; together[k].score += s; together[k].diffSum += d;
       }
     });
     m.teamA.forEach(a => m.teamB.forEach(b => {
       versus[a] = versus[a] || {};
-      versus[a][b] = versus[a][b] || { games: 0, score: 0 };
-      versus[a][b].games++; versus[a][b].score += sA;
+      versus[a][b] = versus[a][b] || { games: 0, score: 0, diffSum: 0 };
+      versus[a][b].games++; versus[a][b].score += sA; versus[a][b].diffSum += dA;
       versus[b] = versus[b] || {};
-      versus[b][a] = versus[b][a] || { games: 0, score: 0 };
-      versus[b][a].games++; versus[b][a].score += sB;
+      versus[b][a] = versus[b][a] || { games: 0, score: 0, diffSum: 0 };
+      versus[b][a].games++; versus[b][a].score += sB; versus[b][a].diffSum += dB;
     }));
   });
   return { together, versus };
@@ -327,51 +366,55 @@ function calcCombos() {
 
 function renderCombos() {
   const { together, versus } = calcCombos();
-  // 시너지 테이블
   const synRows = Object.entries(together)
     .filter(([k,v]) => v.games >= 2)
     .map(([k,v]) => {
       const [a,b] = k.split('|');
-      return { a, b, games: v.games, rate: v.score/v.games };
+      return { a, b, games: v.games, rate: v.score/v.games, avgDiff: v.diffSum/v.games };
     })
     .sort((x,y) => y.rate - x.rate);
   const synHTML = `
-    <thead><tr><th>선수 A</th><th>선수 B</th><th class="num">함께 뛴 경기</th><th class="num">승률</th><th>분포</th></tr></thead>
-    <tbody>${synRows.length === 0 ? `<tr><td colspan="5" class="empty">2경기 이상 함께 뛴 페어 없음</td></tr>` :
+    <thead><tr><th>선수 A</th><th>선수 B</th><th class="num">함께 뛴 경기</th><th class="num">승률</th><th class="num">평균 득실차</th><th>분포</th></tr></thead>
+    <tbody>${synRows.length === 0 ? `<tr><td colspan="6" class="empty">2경기 이상 함께 뛴 페어 없음</td></tr>` :
       synRows.map(r => {
         const cls = r.rate >= 0.6 ? 'pos' : r.rate <= 0.4 ? 'neg' : '';
+        const dCls = r.avgDiff > 0 ? 'pos' : r.avgDiff < 0 ? 'neg' : '';
+        const dTxt = (r.avgDiff > 0 ? '+' : '') + r.avgDiff.toFixed(1);
         return `<tr><td>${findName(r.a)}</td><td>${findName(r.b)}</td>
           <td class="num">${r.games}</td>
           <td class="num ${cls}">${(r.rate*100).toFixed(0)}%</td>
+          <td class="num ${dCls}">${dTxt}</td>
           <td style="min-width:120px;"><div class="bar"><div style="width:${r.rate*100}%"></div></div></td></tr>`;
       }).join('')
     }</tbody>`;
   document.getElementById('syn-table').innerHTML = synHTML;
 
-  // 맞대결 테이블
   const vsRows = [];
   Object.entries(versus).forEach(([a, opp]) => {
     Object.entries(opp).forEach(([b, v]) => {
       if (a < b && v.games >= 2) {
-        vsRows.push({ a, b, games: v.games, rateA: v.score/v.games });
+        vsRows.push({ a, b, games: v.games, rateA: v.score/v.games, avgDiff: v.diffSum/v.games });
       }
     });
   });
   vsRows.sort((x,y) => Math.abs(y.rateA - 0.5) - Math.abs(x.rateA - 0.5));
   const vsHTML = `
-    <thead><tr><th>왼쪽 선수</th><th>vs</th><th>오른쪽 선수</th><th class="num">맞대결 경기</th><th class="num">왼쪽 승률</th></tr></thead>
-    <tbody>${vsRows.length === 0 ? `<tr><td colspan="5" class="empty">2경기 이상 맞붙은 페어 없음</td></tr>` :
+    <thead><tr><th>왼쪽 선수</th><th>vs</th><th>오른쪽 선수</th><th class="num">경기수</th><th class="num">왼쪽 승률</th><th class="num">평균 점수차</th></tr></thead>
+    <tbody>${vsRows.length === 0 ? `<tr><td colspan="6" class="empty">2경기 이상 맞붙은 페어 없음</td></tr>` :
       vsRows.map(r => {
         const cls = r.rateA >= 0.6 ? 'pos' : r.rateA <= 0.4 ? 'neg' : '';
+        const dCls = r.avgDiff > 0 ? 'pos' : r.avgDiff < 0 ? 'neg' : '';
+        const dTxt = (r.avgDiff > 0 ? '+' : '') + r.avgDiff.toFixed(1);
         return `<tr><td>${findName(r.a)}</td><td style="color:#9ca3af;">vs</td><td>${findName(r.b)}</td>
           <td class="num">${r.games}</td>
-          <td class="num ${cls}">${(r.rateA*100).toFixed(0)}%</td></tr>`;
+          <td class="num ${cls}">${(r.rateA*100).toFixed(0)}%</td>
+          <td class="num ${dCls}">${dTxt}</td></tr>`;
       }).join('')
     }</tbody>`;
   document.getElementById('vs-table').innerHTML = vsHTML;
 }
 
-// === 자동 편성 (조합 기반) ===
+// === 자동 편성 ===
 const balSel = new Set();
 function toggleBal(id) { balSel.has(id) ? balSel.delete(id) : balSel.add(id); renderBalPick(); }
 function renderBalPick() {
@@ -392,16 +435,24 @@ function evalSplit(teamA, teamB, combos) {
     }
     return cnt === 0 ? 0.5 : sum/cnt;
   };
-  let mSum = 0, mCnt = 0;
+  let mSum = 0, dSum = 0, mCnt = 0;
   teamA.forEach(a => teamB.forEach(b => {
     const v = versus[a] && versus[a][b];
-    mSum += (v && v.games) ? v.score/v.games : 0.5; mCnt++;
+    mSum += (v && v.games) ? v.score/v.games : 0.5;
+    dSum += (v && v.games) ? v.diffSum/v.games : 0;
+    mCnt++;
   }));
   return {
     synA: teamSyn(teamA),
     synB: teamSyn(teamB),
-    matchExp: mCnt === 0 ? 0.5 : mSum/mCnt
+    matchExp: mCnt === 0 ? 0.5 : mSum/mCnt,
+    expDiff: mCnt === 0 ? 0 : dSum/mCnt
   };
+}
+
+// 균형 점수: 승률 50%에서 벗어난 정도 + 점수차 0에서 벗어난 정도(가중)
+function balanceScore(ev) {
+  return Math.abs(ev.matchExp - 0.5) * 2 + Math.abs(ev.expDiff) * 0.05;
 }
 
 function* combinations(arr, k) {
@@ -419,7 +470,7 @@ function bestSplitBrute(ids, combos) {
     const setA = new Set(tA);
     const tB = ids.filter(x => !setA.has(x));
     const ev = evalSplit(tA, tB, combos);
-    const score = Math.abs(ev.matchExp - 0.5);
+    const score = balanceScore(ev);
     if (!best || score < best.score) best = { teamA: tA, teamB: tB, ...ev, score };
   }
   return best;
@@ -432,7 +483,7 @@ function bestSplitHeuristic(ids, combos) {
     const sh = [...ids].sort(() => Math.random() - 0.5);
     let tA = sh.slice(0, half), tB = sh.slice(half);
     let ev = evalSplit(tA, tB, combos);
-    let cs = Math.abs(ev.matchExp - 0.5);
+    let cs = balanceScore(ev);
     let improved = true;
     while (improved) {
       improved = false;
@@ -441,7 +492,7 @@ function bestSplitHeuristic(ids, combos) {
           const nA = [...tA], nB = [...tB];
           [nA[i], nB[j]] = [nB[j], nA[i]];
           const e2 = evalSplit(nA, nB, combos);
-          const s2 = Math.abs(e2.matchExp - 0.5);
+          const s2 = balanceScore(e2);
           if (s2 < cs - 1e-6) { tA = nA; tB = nB; ev = e2; cs = s2; improved = true; break; }
         }
       }
@@ -456,15 +507,15 @@ function balanceTeams() {
   const ids = [...balSel];
   const combos = calcCombos();
   const result = ids.length <= 16 ? bestSplitBrute(ids, combos) : bestSplitHeuristic(ids, combos);
-  const teamHTML = (label, team, syn) => {
-    return `<div class="team-box">
+  const teamHTML = (label, team, syn) =>
+    `<div class="team-box">
       <h3 style="font-size:15px; margin-bottom:6px;">${label} (${team.length}명)
         <span style="color:#6b7280; font-size:12px; margin-left:6px;">팀 시너지 ${(syn*100).toFixed(0)}%</span></h3>
       <div>${team.map(id => `<span class="chip" style="margin:2px;">${findName(id)}</span>`).join('')}</div>
     </div>`;
-  };
   const expA = (result.matchExp*100).toFixed(1);
   const expB = ((1-result.matchExp)*100).toFixed(1);
+  const diffTxt = result.expDiff === 0 ? '0' : (result.expDiff > 0 ? '+' : '') + result.expDiff.toFixed(1);
   document.getElementById('bal-result').innerHTML = `
     <div class="team-grid">
       ${teamHTML('A팀', result.teamA, result.synA)}
@@ -472,10 +523,11 @@ function balanceTeams() {
     </div>
     <div class="team-box" style="margin-top:8px;">
       <div style="font-size:14px; margin-bottom:6px;">
-        <strong>맞대결 예상 승률</strong> · A팀 ${expA}% vs B팀 ${expB}%
+        <strong>맞대결 예상</strong> · A팀 ${expA}% vs B팀 ${expB}%
+        <span style="margin-left:12px; color:#374151;">예상 점수차 <strong>${diffTxt}</strong> (A 기준)</span>
       </div>
       <div class="bar" style="height:14px;"><div style="width:${expA}%"></div></div>
-      <div class="hint" style="margin-top:6px;">50%에 가까울수록 균형 잡힌 매치업입니다. 경기 데이터가 쌓일수록 정확도가 올라갑니다.</div>
+      <div class="hint" style="margin-top:6px;">50%와 0점차에 가까울수록 균형 잡힌 매치업입니다. 경기 데이터가 쌓일수록 정확도가 올라갑니다.</div>
     </div>`;
 }
 
