@@ -133,6 +133,9 @@
     font-size:14px;line-height:1;display:grid;place-items:center;opacity:0;transition:.15s;
   }
   .member-card:hover .card-x{opacity:1;}
+  .grid.sortable-mode .member-card{cursor:grab;}
+  .grid.sortable-mode .member-card:active{cursor:grabbing;}
+  .grid.sortable-mode .member-card:hover{transform:none;}
 
   /* Schedule */
   .sched-card{padding:18px;margin-bottom:14px;}
@@ -255,7 +258,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.2c</span>
+      <span class="ver" id="verLabel">v1.3a</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -287,9 +290,10 @@
         <button data-key="name" class="on">이름</button>
         <button data-key="plays">참여 빈도</button>
         <button data-key="recent">최근 참석</button>
-        <button data-key="created">등록</button>
+        <button data-key="custom">내맘대로</button>
       </div>
       <button class="btn btn-ghost btn-sm" id="memberSortDir" title="방향 전환">↑</button>
+      <span id="sortHint" style="display:none;font-size:11px;color:var(--gold);font-weight:600;">↔ 드래그로 순서 조정</span>
     </div>
     <div class="grid" id="memberGrid"></div>
   </section>
@@ -406,7 +410,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.2c";
+const APP_VERSION = "1.3a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -444,14 +448,18 @@ const TEAM_LABEL = {pool:"대기 명단",team1:"1팀",team2:"2팀",team3:"3팀"}
 
 /* 회원 정렬 상태 (localStorage 영구화) */
 const SORT_STORE = "fs_sort_members";
-const DEFAULT_DIR = {name:"asc", plays:"desc", recent:"desc", created:"desc"};
+const SORT_KEYS = ["name","plays","recent","custom"];
+const DEFAULT_DIR = {name:"asc", plays:"desc", recent:"desc", custom:"asc"};
 let sortKey="name", sortDir="asc";
 try{
   const s=JSON.parse(localStorage.getItem(SORT_STORE)||"{}");
-  if(s.key) sortKey=s.key;
+  if(s.key && SORT_KEYS.includes(s.key)) sortKey=s.key;
   if(s.dir) sortDir=s.dir;
 }catch(e){}
 const saveSort=()=>localStorage.setItem(SORT_STORE,JSON.stringify({key:sortKey,dir:sortDir}));
+
+/* 회원 내맘대로 순서 (Firestore meta/memberOrder 에서 동기화) */
+let memberOrderIds=[];
 
 /* Best 팀 인원수 (5~11, 영구화) */
 const BEST_SIZE_STORE="fs_best_size";
@@ -551,6 +559,10 @@ onSnapshot(collection(db,"games"),snap=>{
   renderGameList(); renderMembers();
   if(currentGameId && getGame(currentGameId)) renderGameDetail(currentGameId);
 });
+onSnapshot(doc(db,"meta","memberOrder"),snap=>{
+  memberOrderIds = snap.exists() ? (snap.data().ids || []) : [];
+  if(sortKey==="custom"){ renderMembers(); renderScheduleList(); renderBestPicks(); }
+});
 const getGame=id=>games.find(g=>g.id===id);
 
 /* ============================================================
@@ -594,21 +606,28 @@ function memberSortStats(){
   return map;
 }
 function sortMembers(list, stats){
+  if(sortKey==="custom"){
+    const map=new Map(memberOrderIds.map((id,i)=>[id,i]));
+    return [...list].sort((a,b)=>{
+      const ai=map.has(a.id)?map.get(a.id):Infinity;
+      const bi=map.has(b.id)?map.get(b.id):Infinity;
+      if(ai!==bi) return ai-bi;
+      return a.name.localeCompare(b.name,"ko"); // 순서에 없는 신규 회원은 이름순으로 뒤에
+    });
+  }
   const dir=sortDir==="desc"?-1:1;
   const cmp={
     name:(a,b)=>a.name.localeCompare(b.name,"ko"),
     plays:(a,b)=>(stats[a.id]?.plays||0)-(stats[b.id]?.plays||0),
-    recent:(a,b)=>(stats[a.id]?.lastDate||"").localeCompare(stats[b.id]?.lastDate||""),
-    created:(a,b)=>((a.createdAt?.seconds||0)-(b.createdAt?.seconds||0))
+    recent:(a,b)=>(stats[a.id]?.lastDate||"").localeCompare(stats[b.id]?.lastDate||"")
   };
-  // tie-breaker: 항상 이름으로 안정 정렬
   return [...list].sort((a,b)=>{
     const c=cmp[sortKey](a,b)*dir;
     return c!==0?c:a.name.localeCompare(b.name,"ko");
   });
 }
 function memberMetricHTML(m, stats){
-  if(sortKey==="name") return "";
+  if(sortKey==="name"||sortKey==="custom") return "";
   if(sortKey==="plays"){
     const n=stats[m.id]?.plays||0;
     return `<div class="gn" style="color:var(--gold);margin-top:1px;">⚽ ${n}회</div>`;
@@ -617,39 +636,43 @@ function memberMetricHTML(m, stats){
     const d=stats[m.id]?.lastDate;
     return `<div class="gn" style="color:var(--gold);margin-top:1px;">${d?"📅 "+d.slice(5):"– 미참석"}</div>`;
   }
-  if(sortKey==="created"){
-    const t=m.createdAt;
-    if(!t)return `<div class="gn" style="color:var(--gold);margin-top:1px;">📌 –</div>`;
-    const d=new Date(t.seconds?t.seconds*1000:t);
-    return `<div class="gn" style="color:var(--gold);margin-top:1px;">📌 ${d.toISOString().slice(0,10)}</div>`;
-  }
   return "";
 }
 function updateSortUI(){
   $$("#memberSortSeg button").forEach(b=>b.classList.toggle("on",b.dataset.key===sortKey));
   $("#memberSortDir").textContent=sortDir==="asc"?"↑":"↓";
   $("#memberSortDir").title=sortDir==="asc"?"오름차순 (눌러서 내림차순으로)":"내림차순 (눌러서 오름차순으로)";
+  $("#memberSortDir").style.display=sortKey==="custom"?"none":"";
+  $("#sortHint").style.display=sortKey==="custom"?"":"none";
 }
 $$("#memberSortSeg button").forEach(b=>b.onclick=()=>{
   const k=b.dataset.key;
   if(k!==sortKey){ sortKey=k; sortDir=DEFAULT_DIR[k]||"asc"; }
-  saveSort(); updateSortUI(); renderMembers();
+  saveSort(); updateSortUI(); renderMembers(); renderScheduleList(); renderBestPicks();
 });
 $("#memberSortDir").onclick=()=>{
   sortDir=sortDir==="asc"?"desc":"asc";
-  saveSort(); updateSortUI(); renderMembers();
+  saveSort(); updateSortUI(); renderMembers(); renderScheduleList(); renderBestPicks();
 };
 
+let memberSort=null;
+async function persistMemberOrder(){
+  const ids=$$("#memberGrid .member-card").map(c=>c.dataset.id);
+  try{ await setDoc(doc(db,"meta","memberOrder"),{ids}); }
+  catch(e){ toast("순서 저장 실패: "+e.message,true); }
+}
 function renderMembers(){
   $("#memberCount").textContent=members.length+"명";
   const bar=$("#memberSortBar");
   if(bar) bar.style.display=members.length?"":"none";
   const g=$("#memberGrid");
-  if(!members.length){g.innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="ico">👥</div>등록된 회원이 없습니다</div>`;return;}
+  // 이전 Sortable 인스턴스 정리
+  if(memberSort){ memberSort.destroy(); memberSort=null; }
+  if(!members.length){g.innerHTML=`<div class="empty" style="grid-column:1/-1"><div class="ico">👥</div>등록된 회원이 없습니다</div>`;g.classList.remove("sortable-mode");return;}
   const stats=memberSortStats();
   const sorted=sortMembers(members,stats);
   g.innerHTML=sorted.map(m=>`
-    <div class="member-card">
+    <div class="member-card" data-id="${m.id}">
       <button class="card-x" data-id="${m.id}" data-name="${esc(m.name)}">✕</button>
       <div class="avatar ${m.gender}">${esc(genInitial(m.name))}</div>
       <div class="nm">${esc(m.name)}</div>
@@ -657,6 +680,18 @@ function renderMembers(){
       ${memberMetricHTML(m,stats)}
     </div>`).join("");
   $$(".card-x",g).forEach(b=>b.onclick=()=>delMember(b.dataset.id,b.dataset.name));
+  // 내맘대로 모드일 때만 드래그 활성화
+  g.classList.toggle("sortable-mode",sortKey==="custom");
+  if(sortKey==="custom"){
+    memberSort=new Sortable(g,{
+      animation:150,
+      ghostClass:"sortable-ghost",
+      chosenClass:"sortable-chosen",
+      filter:".card-x",       // 삭제 버튼 클릭은 드래그로 안 잡힘
+      preventOnFilter:false,
+      onEnd:persistMemberOrder
+    });
+  }
 }
 
 /* ============================================================
@@ -721,10 +756,12 @@ function renderScheduleList(){
   $("#schedCount").textContent=schedules.length+"개";
   const wrap=$("#schedList");
   if(!schedules.length){wrap.innerHTML=`<div class="empty"><div class="ico">📅</div>등록된 일정이 없습니다</div>`;return;}
+  const stats=memberSortStats();
+  const sortedMembers=sortMembers(members,stats);
   wrap.innerHTML=schedules.map(s=>{
     const att=new Set(s.attendees||[]); const guests=s.guests||[];
     const partN=att.size+guests.length;
-    const toggles=members.map(m=>`
+    const toggles=sortedMembers.map(m=>`
       <div class="att-toggle ${att.has(m.id)?"on":""}" data-mid="${m.id}" data-sid="${s.id}">
         <span>${esc(m.name)} <span class="gender-tag">${m.gender==="M"?"♂":"♀"}</span></span>
         <span class="sw"></span>
@@ -1034,7 +1071,8 @@ function renderQuarters(g){
 function renderBestPicks(){
   const grid=$("#bestPickGrid");
   if(!members.length){grid.innerHTML=`<div style="color:var(--txt-faint);font-size:13px">회원을 먼저 등록하세요</div>`;return;}
-  grid.innerHTML=members.map(m=>`
+  const sorted=sortMembers(members,memberSortStats());
+  grid.innerHTML=sorted.map(m=>`
     <div class="pick" data-id="${m.id}">
       <span class="pc-av ${m.gender}" style="width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:800;">${esc(genInitial(m.name))}</span>
       ${esc(m.name)}
