@@ -209,9 +209,9 @@
   .q-side h5{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;align-items:center;gap:6px;}
   .q-side.left h5{color:var(--blue);}
   .q-side.right h5{color:var(--rose);}
-  .q-score{display:flex;flex-direction:column;align-items:center;gap:6px;padding-top:18px;}
+  .q-score{display:flex;flex-direction:row;align-items:center;gap:8px;padding-top:14px;justify-content:center;}
   .q-score input{width:54px;text-align:center;font-size:20px;font-weight:800;padding:8px;}
-  .q-score .colon{color:var(--txt-faint);font-weight:800;}
+  .q-score .colon{color:var(--txt-faint);font-weight:800;font-size:18px;}
   .q-bench{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);}
   .q-bench h5{font-size:11px;color:var(--txt-faint);font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;}
   .q-result{font-size:11px;font-weight:700;padding:2px 8px;border-radius:99px;margin-left:auto;}
@@ -255,7 +255,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.0a</span>
+      <span class="ver" id="verLabel">v1.1d</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -359,18 +359,18 @@
 
 <!-- settings modal -->
 <div class="modal-bg" id="settingsBg">
-  <div class="modal" style="max-width:480px;">
+  <div class="modal" style="max-width:520px;">
     <h3>⚙ AI 프록시 (GAS) 설정</h3>
-    <p style="margin-bottom:12px;">Gemini API 키는 GAS 서버 측에 보관됩니다. 여기엔 배포된 <b>Web App URL</b> 만 입력하세요. 이 브라우저에만 저장되며, 저장소·소스 코드에는 남지 않습니다.</p>
-    <input id="gurlInput" placeholder="https://script.google.com/macros/s/.../exec" style="width:100%;margin-bottom:8px;" />
-    <p style="font-size:12px;color:var(--txt-faint);margin-bottom:18px;line-height:1.55;">
-      ① script.google.com 에서 Code.gs 붙여넣기<br>
-      ② 스크립트 속성에 <code style="color:var(--gold)">GEMINI_API_KEY</code> 등록<br>
-      ③ 배포 → 웹 앱 (실행: 나, 액세스: 모든 사용자) → URL 복사 후 위에 붙여넣기
+    <p style="margin-bottom:12px;">기본 GAS URL이 코드에 포함되어 있어 별도 설정 없이 작동합니다. 다른 GAS 로 바꿀 때만 입력하세요.</p>
+    <input id="gurlInput" placeholder="기본값 사용 중 — 다른 URL로 바꿀 때만 입력" style="width:100%;margin-bottom:8px;" />
+    <p style="font-size:12px;color:var(--txt-faint);margin-bottom:14px;line-height:1.55;">
+      <b style="color:var(--txt-dim)">현재 사용 중 모델:</b> <span id="modelInfo" style="color:var(--gold)">확인하려면 ↓</span><br>
+      Gemini 모델은 GAS 가 자동 선택 (할당량 큰 flash/flash-lite 계열 중 최신). 6시간 캐시되며 <b>모델 재선택</b>으로 즉시 갱신.
     </p>
-    <div class="modal-actions">
-      <button class="btn btn-ghost btn-sm" id="gurlTest">연결 확인</button>
-      <button class="btn btn-ghost btn-sm" id="gurlClear">삭제</button>
+    <div class="modal-actions" style="flex-wrap:wrap;">
+      <button class="btn btn-ghost btn-sm" id="gurlTest">연결 / 모델 확인</button>
+      <button class="btn btn-ghost btn-sm" id="gurlRefresh">모델 재선택</button>
+      <button class="btn btn-ghost btn-sm" id="gurlClear">기본값으로</button>
       <button class="btn btn-ghost btn-sm" id="settingsCancel">닫기</button>
       <button class="btn btn-gold btn-sm" id="gurlSave">저장</button>
     </div>
@@ -386,14 +386,16 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.1a";
+const APP_VERSION = "1.1d";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
    브라우저·코드·저장소 어디에도 노출되지 않습니다.
-   배포된 GAS Web App URL 만 localStorage 에 저장. (⚙ 버튼) */
+   GAS URL 은 API 키와 달리 민감하지 않아 기본값으로 코드에 포함합니다
+   (다른 GAS 로 바꾸려면 ⚙ 버튼으로 오버라이드). */
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbzpimZW2u65c4a458j62dbt97x4LHWfmZ-kMcEACXX8rsjIm-pdLZug4kH6Su1F3LT5/exec";
 const GAS_URL_STORE = "fs_gas_url";
-const getGasUrl = () => localStorage.getItem(GAS_URL_STORE) || "";
+const getGasUrl = () => localStorage.getItem(GAS_URL_STORE) || DEFAULT_GAS_URL;
 const setGasUrl = u => localStorage.setItem(GAS_URL_STORE, u.trim());
 
 const firebaseConfig = {
@@ -444,30 +446,43 @@ $("#modalCancel").onclick=()=>{$("#modalBg").classList.remove("show");modalResol
 
 /* ---- settings (GAS proxy URL) ---- */
 function openSettings(){
-  $("#gurlInput").value=getGasUrl();
+  const stored=localStorage.getItem(GAS_URL_STORE);
+  $("#gurlInput").value = stored || "";  // 비어있으면 기본값 사용중
+  $("#modelInfo").textContent = lastUsedModel || "확인하려면 ↓";
   $("#settingsBg").classList.add("show");
 }
 $("#openSettings").onclick=openSettings;
 $("#settingsCancel").onclick=()=>$("#settingsBg").classList.remove("show");
 $("#gurlSave").onclick=()=>{
   const u=$("#gurlInput").value.trim();
-  if(!u)return toast("URL을 입력하세요",true);
+  if(!u){ localStorage.removeItem(GAS_URL_STORE); toast("기본 URL 사용"); $("#settingsBg").classList.remove("show"); return; }
   if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec/.test(u))
     return toast("올바른 GAS Web App URL 형식이 아닙니다",true);
   setGasUrl(u); $("#settingsBg").classList.remove("show"); toast("프록시 URL 저장됨");
 };
 $("#gurlClear").onclick=()=>{
-  localStorage.removeItem(GAS_URL_STORE); $("#gurlInput").value=""; toast("URL 삭제됨");
+  localStorage.removeItem(GAS_URL_STORE); $("#gurlInput").value=""; toast("기본 URL로 복원됨");
 };
-$("#gurlTest").onclick=async()=>{
+async function pingProxy(refresh){
   const u=$("#gurlInput").value.trim()||getGasUrl();
-  if(!u)return toast("먼저 URL을 입력하세요",true);
-  const btn=$("#gurlTest"); const o=btn.textContent; btn.disabled=true; btn.textContent="확인중...";
-  try{
-    const r=await fetch(u); const d=await r.json();
-    toast(d.status==="ok"?"✓ 연결 성공 ("+d.model+")":"응답: "+JSON.stringify(d),d.status!=="ok");
-  }catch(e){toast("연결 실패: "+e.message,true);}
-  finally{btn.disabled=false;btn.textContent=o;}
+  if(!u)return toast("URL이 없습니다",true);
+  const url=u+(refresh?"?refresh=1":"");
+  const r=await fetch(url); const d=await r.json();
+  if(d.status==="ok"){
+    lastUsedModel=d.model||lastUsedModel;
+    $("#modelInfo").textContent=d.model+(d.refreshed?" (재선택됨)":"");
+    toast((refresh?"✓ 재선택 완료 — ":"✓ 연결 OK — ")+d.model);
+  }else{ toast("응답: "+(d.error||JSON.stringify(d)),true); }
+}
+$("#gurlTest").onclick=async()=>{
+  const b=$("#gurlTest"), o=b.textContent; b.disabled=true; b.textContent="확인중...";
+  try{ await pingProxy(false); }catch(e){ toast("실패: "+e.message,true); }
+  finally{ b.disabled=false; b.textContent=o; }
+};
+$("#gurlRefresh").onclick=async()=>{
+  const b=$("#gurlRefresh"), o=b.textContent; b.disabled=true; b.textContent="재선택중...";
+  try{ await pingProxy(true); }catch(e){ toast("실패: "+e.message,true); }
+  finally{ b.disabled=false; b.textContent=o; }
 };
 
 /* ---- AI 호출 (GAS 프록시 경유) ---- */
@@ -479,8 +494,10 @@ async function callGemini(prompt){
   if(!res.ok) throw new Error("프록시 응답 오류 "+res.status);
   const data=await res.json();
   if(data.error) throw new Error(data.error);
+  if(data.model) lastUsedModel=data.model;  // 마지막 사용 모델 표시용
   return JSON.parse((data.text||"").replace(/```json|```/g,"").trim());
 }
+let lastUsedModel="";
 
 /* ============================================================
    FIRESTORE LISTENERS
