@@ -255,7 +255,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.2a</span>
+      <span class="ver" id="verLabel">v1.2c</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -263,7 +263,7 @@
       <button class="tab active" data-tab="members">회원</button>
       <button class="tab" data-tab="schedule">일정</button>
       <button class="tab" data-tab="games">경기 기록</button>
-      <button class="tab" data-tab="best">Best 11</button>
+      <button class="tab" data-tab="best">Best 팀</button>
     </nav>
   </div>
 </header>
@@ -341,14 +341,24 @@
     </div>
   </section>
 
-  <!-- ===== BEST 11 ===== -->
+  <!-- ===== BEST TEAM ===== -->
   <section class="panel" id="panel-best">
-    <div class="sec-title"><h2>Best 11을 찾아라</h2></div>
-    <p class="sec-sub">반드시 포함할 회원을 선택하면, 과거 경기 기록을 분석해 가장 잘 맞는 <b>7인 조합</b>을 AI가 추천합니다.</p>
+    <div class="sec-title"><h2>Best 팀</h2></div>
+    <p class="sec-sub">반드시 포함할 회원을 <b>1명 이상</b> 선택하면, 과거 경기 기록을 분석해 그 회원과 가장 잘 맞는 N인 조합을 AI가 추천합니다.</p>
     <div class="card" style="padding:18px;">
-      <div style="font-size:13px;color:var(--txt-dim);font-weight:600;margin-bottom:4px;">포함할 회원 선택 (선택 안 하면 전체에서 최적 조합)</div>
+      <div style="font-size:13px;color:var(--txt-dim);font-weight:600;margin-bottom:8px;">팀 인원수</div>
+      <div class="seg" id="bestSizeSeg" style="margin-bottom:6px;">
+        <button data-n="5">5</button>
+        <button data-n="6">6</button>
+        <button data-n="7" class="on">7</button>
+        <button data-n="8">8</button>
+        <button data-n="9">9</button>
+        <button data-n="10">10</button>
+        <button data-n="11">11</button>
+      </div>
+      <div style="font-size:13px;color:var(--txt-dim);font-weight:600;margin:14px 0 4px;">포함할 회원 선택 (최소 1명 필수)</div>
       <div class="pick-grid" id="bestPickGrid"></div>
-      <button class="btn btn-gold" id="bestFind">🔍 최적의 7인 찾기</button>
+      <button class="btn btn-gold" id="bestFind">🔍 최적의 팀 찾기</button>
     </div>
     <div class="result-box" id="bestResult"></div>
   </section>
@@ -396,7 +406,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.2a";
+const APP_VERSION = "1.2c";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -442,6 +452,11 @@ try{
   if(s.dir) sortDir=s.dir;
 }catch(e){}
 const saveSort=()=>localStorage.setItem(SORT_STORE,JSON.stringify({key:sortKey,dir:sortDir}));
+
+/* Best 팀 인원수 (5~11, 영구화) */
+const BEST_SIZE_STORE="fs_best_size";
+let bestTeamSize=parseInt(localStorage.getItem(BEST_SIZE_STORE)||"7",10);
+if(bestTeamSize<5||bestTeamSize>11) bestTeamSize=7;
 
 /* ============================================================
    HELPERS
@@ -1026,10 +1041,20 @@ function renderBestPicks(){
     </div>`).join("");
   $$(".pick",grid).forEach(p=>p.onclick=()=>p.classList.toggle("on"));
 }
+function updateBestSizeUI(){
+  $$("#bestSizeSeg button").forEach(b=>b.classList.toggle("on",+b.dataset.n===bestTeamSize));
+}
+$$("#bestSizeSeg button").forEach(b=>b.onclick=()=>{
+  bestTeamSize=+b.dataset.n;
+  localStorage.setItem(BEST_SIZE_STORE,String(bestTeamSize));
+  updateBestSizeUI();
+});
+
 $("#bestFind").onclick=async()=>{
-  if(members.length<7)return toast("회원이 7명 이상 필요합니다",true);
+  if(members.length<bestTeamSize)return toast(`회원이 ${bestTeamSize}명 이상 필요합니다`,true);
   const must=$$("#bestPickGrid .pick.on").map(p=>p.dataset.id);
-  if(must.length>7)return toast("포함 회원은 7명 이하로 선택하세요",true);
+  if(must.length<1)return toast("포함할 회원을 1명 이상 선택하세요",true);
+  if(must.length>bestTeamSize)return toast(`포함 회원은 ${bestTeamSize}명 이하로 선택하세요`,true);
   const btn=$("#bestFind"); const orig=btn.innerHTML;
   btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> AI 분석 중...`;
   try{
@@ -1037,9 +1062,9 @@ $("#bestFind").onclick=async()=>{
     const roster=members.map(m=>({id:m.id,name:m.name,gender:m.gender,
       winRate:digest.players.find(x=>x.id===m.id)?.winRate??"기록없음"}));
     const mustNames=must.map(id=>members.find(m=>m.id===id)?.name);
-    const prompt=`너는 풋살 데이터 분석가다. 아래 회원 중 가장 잘 맞고 강한 "베스트 7인" 조합을 골라라.
-${must.length?`반드시 포함할 회원(id): ${JSON.stringify(must)} (이름: ${mustNames.join(", ")})`:"포함 강제 회원 없음 — 전체에서 최강 7인 선정"}
-정확히 7명을 선택. 과거 승률과 함께 뛴 시너지를 근거로.
+    const prompt=`너는 풋살 데이터 분석가다. 아래 회원 중 가장 잘 맞고 강한 "베스트 ${bestTeamSize}인" 조합을 골라라.
+반드시 포함할 회원(id): ${JSON.stringify(must)} (이름: ${mustNames.join(", ")})
+정확히 ${bestTeamSize}명을 선택. 과거 승률과 함께 뛴 시너지를 근거로.
 
 [전체 회원]
 ${JSON.stringify(roster)}
@@ -1051,10 +1076,10 @@ ${JSON.stringify(digest.players)}
 ${JSON.stringify(digest.synergy.slice(0,20))}
 
 반드시 아래 JSON만 출력:
-{"team":["회원id",...7개],"reasoning":"선정 근거를 3~4문장 한국어로"}`;
+{"team":["회원id",...${bestTeamSize}개],"reasoning":"선정 근거를 3~4문장 한국어로"}`;
     const out=await callGemini(prompt);
     const valid=new Set(members.map(m=>m.id));
-    const team=(out.team||[]).filter(id=>valid.has(id)).slice(0,7);
+    const team=(out.team||[]).filter(id=>valid.has(id)).slice(0,bestTeamSize);
     renderBestResult(team,out.reasoning,digest);
   }catch(e){toast("AI 분석 실패: "+e.message,true);}
   finally{btn.disabled=false;btn.innerHTML=orig;}
@@ -1073,7 +1098,7 @@ function renderBestResult(teamIds,reasoning,digest){
   }).join("");
   box.innerHTML=`
     <div class="card" style="padding:18px;">
-      <div class="sec-title" style="margin-bottom:14px"><h2>⭐ Best 7</h2><span class="count">${teamIds.length}인</span></div>
+      <div class="sec-title" style="margin-bottom:14px"><h2>⭐ Best ${teamIds.length}</h2><span class="count">${teamIds.length}인</span></div>
       <div style="display:flex;flex-direction:column;gap:8px;">${chips}</div>
     </div>
     ${reasoning?`<div class="ai-reason">${esc(reasoning)}</div>`:""}`;
@@ -1081,6 +1106,7 @@ function renderBestResult(teamIds,reasoning,digest){
 
 /* init */
 updateSortUI();
+updateBestSizeUI();
 $("#sDate").value=new Date().toISOString().slice(0,10);
 </script>
 </body>
