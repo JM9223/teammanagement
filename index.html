@@ -207,6 +207,11 @@
   .quarters{margin-top:8px;}
   .q-card{background:var(--panel);border:1px solid var(--line-soft);border-radius:14px;padding:16px;margin-bottom:14px;}
   .q-head{display:flex;align-items:center;gap:10px;margin-bottom:14px;}
+  .q-matchup{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:-8px 0 14px;padding-bottom:14px;border-bottom:1px dashed var(--line);}
+  .q-matchup .lbl{font-size:11px;color:var(--txt-faint);font-weight:600;margin-right:2px;}
+  .q-matchup .mu{font-family:inherit;font-size:12px;font-weight:700;background:var(--bg-soft);border:1px solid var(--line);color:var(--txt-dim);padding:5px 10px;border-radius:7px;cursor:pointer;transition:.12s;}
+  .q-matchup .mu:hover{border-color:var(--gold);color:var(--gold);}
+  .q-matchup .mu.on{background:var(--gold);color:#2a1d00;border-color:var(--gold);}
   .q-num{font-size:15px;font-weight:800;color:var(--gold);}
   .q-vs{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:start;}
   .q-side h5{font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;display:flex;align-items:center;gap:6px;}
@@ -258,7 +263,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.3d</span>
+      <span class="ver" id="verLabel">v1.4a</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -410,14 +415,14 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.3d";
+const APP_VERSION = "1.4a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
    브라우저·코드·저장소 어디에도 노출되지 않습니다.
    GAS URL 은 API 키와 달리 민감하지 않아 기본값으로 코드에 포함합니다
    (다른 GAS 로 바꾸려면 ⚙ 버튼으로 오버라이드). */
-const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycby7-Bwmbh3A8TvQYBYz4mfNf_nT4bJ0iRcDhRbFwaUzAvJNEYYHCXelNdAJAsIbwg-D/exec";
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbzpimZW2u65c4a458j62dbt97x4LHWfmZ-kMcEACXX8rsjIm-pdLZug4kH6Su1F3LT5/exec";
 const GAS_URL_STORE = "fs_gas_url";
 const getGasUrl = () => localStorage.getItem(GAS_URL_STORE) || DEFAULT_GAS_URL;
 const setGasUrl = u => localStorage.setItem(GAS_URL_STORE, u.trim());
@@ -1040,17 +1045,53 @@ async function persistQuarters(){
   const qs=(g.quarters||[]).map((_,i)=>readQuarterDom(i));
   await updateDoc(doc(db,"games",currentGameId),{quarters:qs});
 }
+function currentMatchupKey(q, f){
+  if(!f) return "";
+  const eq=(a,b)=>a.length===b.length&&a.every(x=>b.includes(x));
+  const t=[f.team1||[],f.team2||[],f.team3||[]];
+  const L=q.left||[], R=q.right||[];
+  // 좌우 순서 무관하게 매칭
+  const pairs=[["12",0,1],["13",0,2],["23",1,2]];
+  for(const [key,a,b] of pairs){
+    if((eq(L,t[a])&&eq(R,t[b]))||(eq(L,t[b])&&eq(R,t[a]))) return key;
+  }
+  return "";
+}
+async function applyMatchup(qIdx, leftTeamNum, rightTeamNum){
+  const g=getGame(currentGameId); if(!g) return;
+  const f=g.formation||{};
+  const teams={1:f.team1||[],2:f.team2||[],3:f.team3||[]};
+  const qs=[...(g.quarters||[])]; const q=qs[qIdx]; if(!q) return;
+  q.left=[...teams[leftTeamNum]];
+  q.right=[...teams[rightTeamNum]];
+  // 남은 팀 + pool = 벤치
+  const used=new Set([leftTeamNum,rightTeamNum]);
+  const rest=[1,2,3].filter(n=>!used.has(n));
+  q.bench=[...rest.flatMap(n=>teams[n]),...(f.pool||[])];
+  await saveGame({quarters:qs});
+}
 function renderQuarters(g){
   const wrap=$("#quartersWrap"); const qs=g.quarters||[];
   if(!qs.length){wrap.innerHTML=`<div style="color:var(--txt-faint);font-size:13px;padding:8px 0">아직 쿼터가 없습니다. 아래 버튼으로 추가하세요.</div>`;return;}
+  const numTeams=g.numTeams||2;
+  const f=g.formation||{};
   wrap.innerHTML=qs.map((q,i)=>{
     const side=(arr,zone)=>arr.map(pid=>{const p=pById(g,pid);return p?chipHTML(p,false):"";}).join("");
     const sl=q.scoreLeft, sr=q.scoreRight;
     let res="";
     if(sl!=null&&sr!=null){const r=sl>sr?["w","1팀 승"]:sl<sr?["l","2팀 승"]:["d","무"];res=`<span class="q-result ${r[0]}">${r[1]}</span>`;}
+    const activeKey=numTeams===3?currentMatchupKey(q,f):"";
+    const matchupRow=numTeams===3?`
+      <div class="q-matchup">
+        <span class="lbl">대진</span>
+        <button class="mu ${activeKey==="12"?"on":""}" data-q="${i}" data-l="1" data-r="2">1팀 vs 2팀</button>
+        <button class="mu ${activeKey==="13"?"on":""}" data-q="${i}" data-l="1" data-r="3">1팀 vs 3팀</button>
+        <button class="mu ${activeKey==="23"?"on":""}" data-q="${i}" data-l="2" data-r="3">2팀 vs 3팀</button>
+      </div>`:"";
     return `<div class="q-card" id="q-${i}">
       <div class="q-head"><span class="q-num">${i+1}쿼터</span>${res}
         <button class="btn btn-danger btn-sm delq" data-i="${i}" style="margin-left:auto">삭제</button></div>
+      ${matchupRow}
       <div class="q-vs">
         <div class="q-side left">
           <h5>● 1팀 (좌)</h5>
@@ -1080,6 +1121,7 @@ function renderQuarters(g){
     });
   });
   $$(".delq",wrap).forEach(b=>b.onclick=()=>delQuarter(+b.dataset.i));
+  $$(".mu",wrap).forEach(b=>b.onclick=()=>applyMatchup(+b.dataset.q,+b.dataset.l,+b.dataset.r));
   $$('#quartersWrap input[type="number"]').forEach(inp=>inp.addEventListener("change",persistQuarters));
 }
 
