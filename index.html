@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5f</span>
+      <span class="ver" id="verLabel">v1.5g</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5f";
+const APP_VERSION = "1.5g";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -593,7 +593,16 @@ onSnapshot(query(collection(db,"schedules"),orderBy("date","desc")),snap=>{
 onSnapshot(collection(db,"games"),snap=>{
   games=snap.docs.map(d=>({id:d.id,...d.data()}));
   renderGameList(); renderScheduleList(); renderMembers();
-  if(currentGameId && getGame(currentGameId)) renderGameDetail(currentGameId);
+  if(currentGameId && getGame(currentGameId)){
+    // 로컬 쓰기 직후엔 전체 재렌더 대신 성적표만 갱신 (포커스 유실 방지)
+    const isLocalEcho = Date.now()-localWriteAt < 2500;
+    if(isLocalEcho){
+      const g=getGame(currentGameId);
+      const el=$("#gdStandings"); if(el&&g) el.innerHTML=standingsHTML(g);
+    } else {
+      renderGameDetail(currentGameId);
+    }
+  }
 });
 onSnapshot(doc(db,"meta","memberOrder"),snap=>{
   memberOrderIds = snap.exists() ? (snap.data().ids || []) : [];
@@ -1189,8 +1198,10 @@ function readQuarterDom(idx){
 async function persistQuarters(){
   const g=getGame(currentGameId); if(!g)return;
   const qs=(g.quarters||[]).map((existing,i)=>({...existing, ...readQuarterDom(i)}));
+  localWriteAt=Date.now();   // 스냅샷 재렌더 억제용
   await updateDoc(doc(db,"games",currentGameId),{quarters:qs});
 }
+let localWriteAt=0;
 /* 스코어 입력 시 즉시 저장하면 스냅샷→재렌더로 포커스 유실.
    디바운스로 700ms 쉴 때만 저장. blur 시엔 즉시 저장. */
 let _qSaveTimer=null;
