@@ -227,6 +227,18 @@
   .q-result.l{background:rgba(227,106,126,.15);color:var(--rose);}
   .q-result.d{background:var(--line);color:var(--txt-dim);}
 
+  /* 팀 성적 종합 */
+  .standings{background:var(--bg-soft);border:1px solid var(--line-soft);border-radius:10px;padding:10px 12px;margin-top:12px;}
+  .stand-head{font-size:11px;font-weight:700;color:var(--txt-dim);margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;}
+  .stand-row{display:flex;gap:10px;align-items:center;padding:4px 0;font-size:13.5px;}
+  .stand-row+.stand-row{border-top:1px dashed var(--line-soft);}
+  .stand-tag{font-size:11px;font-weight:800;padding:2px 8px;border-radius:99px;border:1px solid;flex:0 0 auto;}
+  .stand-tag.t1{background:rgba(91,141,239,.12);color:var(--blue);border-color:rgba(91,141,239,.4);}
+  .stand-tag.t2{background:rgba(227,106,126,.12);color:var(--rose);border-color:rgba(227,106,126,.4);}
+  .stand-tag.t3{background:rgba(70,196,180,.12);color:var(--teal);border-color:rgba(70,196,180,.4);}
+  .stand-rec{font-weight:600;}
+  .stand-gd{margin-left:auto;color:var(--txt-faint);font-family:'Courier New',monospace;font-weight:700;}
+
   /* Best 11 */
   .pick-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px;margin:14px 0;}
   .pick{display:flex;align-items:center;gap:8px;padding:9px 11px;border-radius:10px;border:1px solid var(--line);background:var(--bg-soft);cursor:pointer;font-size:13.5px;font-weight:600;transition:.15s;user-select:none;}
@@ -263,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.4b</span>
+      <span class="ver" id="verLabel">v1.5a</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -330,6 +342,7 @@
         <button class="btn btn-ghost btn-sm" id="gBack">← 목록</button>
         <div><div class="sched-date" id="gdDate"></div><div class="sched-title" id="gdTitle"></div></div>
       </div>
+      <div id="gdStandings"></div>
 
       <div class="sec-title" style="margin-bottom:8px;"><h2>팀 편성</h2><span class="count" id="gdPartCount">0명</span></div>
       <div class="toolbar">
@@ -415,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.4b";
+const APP_VERSION = "1.5a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -579,7 +592,7 @@ onSnapshot(query(collection(db,"schedules"),orderBy("date","desc")),snap=>{
 });
 onSnapshot(collection(db,"games"),snap=>{
   games=snap.docs.map(d=>({id:d.id,...d.data()}));
-  renderGameList(); renderMembers();
+  renderGameList(); renderScheduleList(); renderMembers();
   if(currentGameId && getGame(currentGameId)) renderGameDetail(currentGameId);
 });
 onSnapshot(doc(db,"meta","memberOrder"),snap=>{
@@ -799,7 +812,11 @@ function renderScheduleList(){
         <span class="badge ${s.closed?"closed":"open"}">${s.closed?"마감":"모집중"}</span>
         <span class="sched-meta">참석 ${partN}명</span>
       </div>
-      ${s.closed?`<div style="color:var(--txt-dim);font-size:13px;margin-top:12px;">신청이 마감되었습니다. 경기 기록 탭에서 팀을 편성하세요.</div>`:`
+      ${s.closed?(()=>{
+        const g=getGame(s.id);
+        const st=g?standingsHTML(g):"";
+        return st||`<div style="color:var(--txt-dim);font-size:13px;margin-top:12px;">경기 기록 탭에서 팀을 편성하고 쿼터별 스코어를 입력하세요.</div>`;
+      })():`
       <div class="att-grid">${toggles}</div>
       <div class="guest-box">
         <div class="form-row">
@@ -871,6 +888,52 @@ function winRateOf(pid){
   return s&&s.played?Math.round(s.won/s.played*100):null;
 }
 
+/* 팀별 승/무/패 + 득실 종합 (일정 카드 & 경기 상세용) */
+function teamStandings(game){
+  const n=game.numTeams||2;
+  const f=game.formation||{};
+  const teams={1:f.team1||[],2:f.team2||[],3:f.team3||[]};
+  const stats={}, recorded={scored:0, custom:0};
+  for(let i=1;i<=n;i++) stats[i]={w:0,d:0,l:0,gf:0,ga:0};
+  const eqSet=(a,b)=>a.length&&a.length===b.length&&a.every(x=>b.includes(x));
+  (game.quarters||[]).forEach(q=>{
+    if(q.scoreLeft==null||q.scoreRight==null) return;
+    recorded.scored++;
+    let lt=null, rt=null;
+    for(let i=1;i<=n;i++){
+      if(eqSet(q.left||[],teams[i])) lt=i;
+      if(eqSet(q.right||[],teams[i])) rt=i;
+    }
+    if(!lt||!rt){ recorded.custom++; return; } // 커스텀 조정된 쿼터는 팀 성적에서 제외
+    const sl=+q.scoreLeft, sr=+q.scoreRight;
+    stats[lt].gf+=sl; stats[lt].ga+=sr;
+    stats[rt].gf+=sr; stats[rt].ga+=sl;
+    if(sl>sr){ stats[lt].w++; stats[rt].l++; }
+    else if(sl<sr){ stats[lt].l++; stats[rt].w++; }
+    else { stats[lt].d++; stats[rt].d++; }
+  });
+  return {stats, recorded, numTeams:n};
+}
+function standingsHTML(game){
+  const {stats,recorded,numTeams}=teamStandings(game);
+  if(recorded.scored===0) return "";
+  const rows=[];
+  for(let i=1;i<=numTeams;i++){
+    const r=stats[i];
+    rows.push(`<div class="stand-row">
+      <span class="stand-tag t${i}">${i}팀</span>
+      <span class="stand-rec">${r.w}승 ${r.d}무 ${r.l}패</span>
+      <span class="stand-gd">${r.gf} : ${r.ga}</span>
+    </div>`);
+  }
+  const usable=recorded.scored-recorded.custom;
+  const foot=recorded.custom>0?` · <span style="color:var(--txt-faint)">커스텀 조정 ${recorded.custom}쿼터 제외</span>`:"";
+  return `<div class="standings">
+    <div class="stand-head">📊 팀 성적 <span style="color:var(--txt-faint);font-weight:400;">· 집계 ${usable}쿼터${foot}</span></div>
+    ${rows.join("")}
+  </div>`;
+}
+
 /* ============================================================
    3. GAMES — list
    ============================================================ */
@@ -918,6 +981,7 @@ function renderGameDetail(id){
   $("#gdDate").textContent=g.date;
   $("#gdTitle").textContent=g.title||"";
   $("#gdPartCount").textContent=(g.participants||[]).length+"명";
+  $("#gdStandings").innerHTML=standingsHTML(g);
   // team count seg
   $$("#teamCountSeg button").forEach(b=>b.classList.toggle("on",+b.dataset.n===(g.numTeams||2)));
   renderTeamBoard(g);
