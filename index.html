@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5b</span>
+      <span class="ver" id="verLabel">v1.5d</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5b";
+const APP_VERSION = "1.5d";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -878,8 +878,13 @@ function statDigest(){
     id,name:s.name,played:s.played,won:s.won,
     winRate:s.played?Math.round(s.won/s.played*100):null
   }));
+  const nameOf=id=>stat[id]?.name||id;
   const synergy=Object.entries(pairWin).filter(([,v])=>v.together>=2)
-    .map(([k,v])=>({pair:k,together:v.together,winRate:Math.round(v.won/v.together*100)}))
+    .map(([k,v])=>{
+      const [a,b]=k.split("|");
+      return {pair:k, ids:[a,b], names:[nameOf(a),nameOf(b)],
+              together:v.together, winRate:Math.round(v.won/v.together*100)};
+    })
     .sort((a,b)=>b.winRate-a.winRate);
   return {players,synergy};
 }
@@ -889,12 +894,13 @@ function winRateOf(pid){
 }
 
 /* 쿼터의 좌·우가 어느 팀인지 판정.
-   ① 저장된 leftTeam/rightTeam 우선
-   ② 없으면 formation 매칭 시도 (구 데이터 호환)
-   ③ 그래도 못 찾으면 2팀 편성일 땐 기본 1/2, 3팀 편성이면 null */
+   ① 저장된 leftTeam/rightTeam 최우선
+   ② 2팀 편성은 항상 좌=1/우=2 (대진 유일)
+   ③ 3팀 편성은 formation 매칭 시도 */
 function resolveQuarterTeams(q, g){
   const n=g.numTeams||2;
   if(q.leftTeam && q.rightTeam) return {L:q.leftTeam, R:q.rightTeam};
+  if(n===2) return {L:1, R:2};
   const f=g.formation||{};
   const teams={1:f.team1||[],2:f.team2||[],3:f.team3||[]};
   const eq=(a,b)=>a.length&&a.length===b.length&&a.every(x=>b.includes(x));
@@ -903,7 +909,6 @@ function resolveQuarterTeams(q, g){
     if(eq(q.left||[],teams[i])) L=i;
     if(eq(q.right||[],teams[i])) R=i;
   }
-  if(!L && !R && n===2){ return {L:1, R:2}; }  // 2팀 편성 기본 가정
   return {L, R};
 }
 
@@ -932,16 +937,17 @@ function standingsHTML(game){
   const rows=[];
   for(let i=1;i<=numTeams;i++){
     const r=stats[i];
+    const played=r.w+r.d+r.l;
     rows.push(`<div class="stand-row">
       <span class="stand-tag t${i}">${i}팀</span>
-      <span class="stand-rec">${r.w}승 ${r.d}무 ${r.l}패</span>
+      <span class="stand-rec">${played}경기 중 <b>${r.w}승 ${r.d}무 ${r.l}패</b></span>
       <span class="stand-gd">${r.gf} : ${r.ga}</span>
     </div>`);
   }
   const usable=recorded.scored-recorded.custom;
   const foot=recorded.custom>0?` · <span style="color:var(--txt-faint)">커스텀 조정 ${recorded.custom}쿼터 제외</span>`:"";
   return `<div class="standings">
-    <div class="stand-head">📊 팀 성적 <span style="color:var(--txt-faint);font-weight:400;">· 집계 ${usable}쿼터${foot}</span></div>
+    <div class="stand-head">📊 팀 성적 <span style="color:var(--txt-faint);font-weight:400;">· 총 ${usable}쿼터 기록${foot}</span></div>
     ${rows.join("")}
   </div>`;
 }
@@ -1059,24 +1065,63 @@ $("#aiBalance").onclick=async()=>{
   try{
     const n=g.numTeams||2;
     const digest=statDigest();
-    const parts=(g.participants||[]).map(p=>({id:p.id,name:p.name,gender:p.gender,isGuest:p.isGuest,
-      winRate:digest.players.find(x=>x.id===p.id)?.winRate??"기록없음"}));
-    const prompt=`너는 풋살 경기의 팀 편성 코치다. 아래 참석자들을 ${n}개 팀으로 나눠라.
-목표: 각 팀의 전력(과거 승률·시너지)이 최대한 균형을 이루도록. 게스트(기록없음)는 보통 실력으로 간주하되 양 팀에 분산.
-인원이 안 맞으면 한 팀이 1명 많게.
+    // 참석자를 읽기 쉬운 텍스트로
+    const partsText=(g.participants||[]).map(p=>{
+      const s=digest.players.find(x=>x.id===p.id);
+      const gtag=p.gender==="M"?"남":"여";
+      if(p.isGuest) return `- ${p.name} [id:${p.id}, ${gtag}, 게스트(실력미상)]`;
+      const pl=s?.played||0, w=s?.won||0, wr=s?.winRate;
+      if(pl<3) return `- ${p.name} [id:${p.id}, ${gtag}, ${pl}경기 ${w}승 (${wr??"?"}%) — 표본부족]`;
+      return `- ${p.name} [id:${p.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%)]`;
+    }).join("\n");
+    const participantIds=new Set((g.participants||[]).map(p=>p.id));
+    // 참석자간 페어만 필터
+    const relevantSynergy=digest.synergy.filter(s=>
+      participantIds.has(s.ids[0])&&participantIds.has(s.ids[1])&&s.together>=3);
+    const goodPairs=relevantSynergy
+      .filter(s=>s.winRate>=60)
+      .slice(0,12)
+      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
+      .join("\n")||"(해당 없음)";
+    const badPairs=relevantSynergy
+      .filter(s=>s.winRate<=40)
+      .sort((a,b)=>a.winRate-b.winRate)
+      .slice(0,12)
+      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
+      .join("\n")||"(해당 없음)";
 
-[참석자]
-${JSON.stringify(parts)}
+    const prompt=`너는 풋살 팀 편성 전문가다. 아래 참석자를 ${n}개 팀으로 균형있게 분배해라.
 
-[선수별 과거 승률(%)]
-${JSON.stringify(digest.players)}
+【목표 (우선순위 순)】
+1. 각 팀의 실력 총합(개인 승률 합계)이 최대한 균등하게
+2. "좋은 조합"의 선수들은 같은 팀에 유지 (실전에서 승률 좋았던 조합)
+3. "나쁜 조합"의 선수들은 서로 다른 팀으로 분리 (실전에서 부진했던 조합)
+4. 게스트는 각 팀에 균등 분배
+5. 팀 인원 최대 1명 차이
 
-[함께 뛰었을 때 승률 높은 조합 (pair는 선수id를 |로 연결)]
-${JSON.stringify(digest.synergy.slice(0,15))}
+【해석 주의】
+- 3경기 미만 선수의 승률은 표본 부족, 50%에 가깝게 보정해 해석
+- 게스트는 실력 미상, 50%로 간주하고 분산 배치
+- "좋은/나쁜 조합" 통계는 실제 경기 결과 기반이라 개인 승률만큼 중요한 신호
 
-반드시 아래 JSON만 출력:
-{"teams":[["참석자id",...],["참석자id",...]${n===3?',["참석자id",...]':""}],"reasoning":"편성 근거를 2~3문장 한국어로"}`;
+【참석자】
+${partsText}
+
+【좋은 조합 (같은 팀에 유지 권장)】
+${goodPairs}
+
+【나쁜 조합 (다른 팀으로 분리 권장)】
+${badPairs}
+
+반드시 아래 JSON 형식으로만 응답:
+{
+  "analysis": "① 팀별 실력 합 산출  ② 좋은 조합 배치  ③ 나쁜 조합 분리  ④ 게스트 분배 — 4단계 상세 설명",
+  "teams": [["id",...],["id",...]${n===3?',["id",...]':""}],
+  "reasoning": "사용자에게 보여줄 편성 근거 (2~3문장, 한국어). 어떤 조합을 붙였고 어떤 걸 뗐는지 구체적으로 언급"
+}`;
+
     const out=await callGemini(prompt);
+    console.info("AI balance analysis:", out.analysis);
     const ids=new Set((g.participants||[]).map(p=>p.id));
     const teams=(out.teams||[]).map(t=>t.filter(id=>ids.has(id)));
     const used=new Set(teams.flat());
@@ -1242,25 +1287,57 @@ $("#bestFind").onclick=async()=>{
   btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> AI 분석 중...`;
   try{
     const digest=statDigest();
-    const roster=members.map(m=>({id:m.id,name:m.name,gender:m.gender,
-      winRate:digest.players.find(x=>x.id===m.id)?.winRate??"기록없음"}));
+    // 회원별 통계 텍스트
+    const rosterText=members.map(m=>{
+      const s=digest.players.find(x=>x.id===m.id);
+      const gtag=m.gender==="M"?"남":"여";
+      const pl=s?.played||0, w=s?.won||0, wr=s?.winRate;
+      if(!pl) return `- ${m.name} [id:${m.id}, ${gtag}, 기록 없음]`;
+      if(pl<3) return `- ${m.name} [id:${m.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%) — 표본부족]`;
+      return `- ${m.name} [id:${m.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%)]`;
+    }).join("\n");
+    const memberIds=new Set(members.map(m=>m.id));
+    const relevantSynergy=digest.synergy.filter(s=>
+      memberIds.has(s.ids[0])&&memberIds.has(s.ids[1])&&s.together>=3);
+    const goodPairs=relevantSynergy
+      .filter(s=>s.winRate>=60).slice(0,15)
+      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
+      .join("\n")||"(해당 없음)";
+    const badPairs=relevantSynergy
+      .filter(s=>s.winRate<=40).sort((a,b)=>a.winRate-b.winRate).slice(0,10)
+      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
+      .join("\n")||"(해당 없음)";
     const mustNames=must.map(id=>members.find(m=>m.id===id)?.name);
-    const prompt=`너는 풋살 데이터 분석가다. 아래 회원 중 가장 잘 맞고 강한 "베스트 ${bestTeamSize}인" 조합을 골라라.
-반드시 포함할 회원(id): ${JSON.stringify(must)} (이름: ${mustNames.join(", ")})
-정확히 ${bestTeamSize}명을 선택. 과거 승률과 함께 뛴 시너지를 근거로.
 
-[전체 회원]
-${JSON.stringify(roster)}
+    const prompt=`너는 풋살 데이터 분석가다. 아래 회원 중 가장 강하고 잘 맞는 "베스트 ${bestTeamSize}인" 조합을 선정하라.
 
-[선수별 승률(%)]
-${JSON.stringify(digest.players)}
+【필수 조건】
+반드시 포함할 회원: ${mustNames.join(", ")} (id: ${JSON.stringify(must)})
+정확히 ${bestTeamSize}명을 선택 (필수 포함 회원 포함).
 
-[함께 뛰었을 때 승률 높은 조합 (pair는 회원id를 |로 연결)]
-${JSON.stringify(digest.synergy.slice(0,20))}
+【선정 기준 (우선순위)】
+1. 필수 회원과 함께했을 때 승률 좋았던 조합 우선 (좋은 페어 데이터)
+2. 개인 승률 높은 회원 우선
+3. 나쁜 조합(서로 안 맞는 페어)은 함께 뽑지 말 것
+4. 표본 부족(경기수 3 미만)이나 기록 없는 회원의 승률은 신뢰도 낮게 해석 (50%에 근접)
 
-반드시 아래 JSON만 출력:
-{"team":["회원id",...${bestTeamSize}개],"reasoning":"선정 근거를 3~4문장 한국어로"}`;
+【전체 회원 및 개인 통계】
+${rosterText}
+
+【좋은 조합】
+${goodPairs}
+
+【나쁜 조합 (같이 뽑지 말 것)】
+${badPairs}
+
+반드시 아래 JSON 형식으로만 응답:
+{
+  "analysis": "① 필수 회원의 좋은 페어 파트너 후보 나열  ② 나쁜 조합 회피 확인  ③ 최종 7인 총 실력 확인 — 단계별 상세 설명",
+  "team": ["회원id",...${bestTeamSize}개],
+  "reasoning": "선정 근거 (3~4문장, 한국어). 어떤 조합/시너지 때문에 뽑았는지 구체적으로"
+}`;
     const out=await callGemini(prompt);
+    console.info("Best team analysis:", out.analysis);
     const valid=new Set(members.map(m=>m.id));
     const team=(out.team||[]).filter(id=>valid.has(id)).slice(0,bestTeamSize);
     renderBestResult(team,out.reasoning,digest);
