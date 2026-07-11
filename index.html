@@ -263,7 +263,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.4a</span>
+      <span class="ver" id="verLabel">v1.4b</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -344,7 +344,7 @@
       <div class="ai-reason" id="balanceReason" style="display:none;"></div>
 
       <div class="sec-title" style="margin:28px 0 4px;"><h2>쿼터별 경기 기록</h2></div>
-      <p class="sec-sub">팀 편성을 기본값으로 불러옵니다. 드래그로 출전/벤치를 조정하고 스코어를 입력하세요. (최대 8쿼터)</p>
+      <p class="sec-sub">팀 편성을 기본값으로 불러옵니다. 드래그로 출전/벤치를 조정하고 스코어를 입력하세요.</p>
       <div class="quarters" id="quartersWrap"></div>
       <button class="btn btn-ghost btn-sm" id="addQuarter" style="margin-top:4px;">＋ 쿼터 추가</button>
     </div>
@@ -415,7 +415,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.4a";
+const APP_VERSION = "1.4b";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -1024,7 +1024,6 @@ function defaultQuarter(g){
 $("#addQuarter").onclick=async()=>{
   const g=getGame(currentGameId); if(!g)return;
   const qs=[...(g.quarters||[])];
-  if(qs.length>=8)return toast("최대 8쿼터입니다",true);
   qs.push(defaultQuarter(g));
   await saveGame({quarters:qs});
 };
