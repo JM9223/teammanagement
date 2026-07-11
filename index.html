@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5e</span>
+      <span class="ver" id="verLabel">v1.5f</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5e";
+const APP_VERSION = "1.5f";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -896,19 +896,33 @@ function winRateOf(pid){
 /* 쿼터의 좌·우가 어느 팀인지 판정.
    ① 저장된 leftTeam/rightTeam 최우선
    ② 2팀 편성은 항상 좌=1/우=2 (대진 유일)
-   ③ 3팀 편성은 formation 매칭 시도 */
+   ③ 3팀 편성은 formation 과 과반 매칭 (좌/우 중 팀별 인원을 세서 과반이면 그 팀) */
+function bestTeamMatch(playerList, teams, numTeams){
+  if(!playerList||!playerList.length) return null;
+  const counts={};
+  for(let i=1;i<=numTeams;i++) counts[i]=0;
+  playerList.forEach(pid=>{
+    for(let i=1;i<=numTeams;i++){
+      if((teams[i]||[]).includes(pid)) counts[i]++;
+    }
+  });
+  let best=null, bestCount=0;
+  for(let i=1;i<=numTeams;i++){
+    if(counts[i]>bestCount){ bestCount=counts[i]; best=i; }
+  }
+  // 과반(> 절반) 이상일 때만 인정
+  return bestCount*2 > playerList.length ? best : null;
+}
 function resolveQuarterTeams(q, g){
-  const n=g.numTeams||2;
+  const n=+g.numTeams||2;
   if(q.leftTeam && q.rightTeam) return {L:q.leftTeam, R:q.rightTeam};
   if(n===2) return {L:1, R:2};
   const f=g.formation||{};
   const teams={1:f.team1||[],2:f.team2||[],3:f.team3||[]};
-  const eq=(a,b)=>a.length&&a.length===b.length&&a.every(x=>b.includes(x));
-  let L=null, R=null;
-  for(let i=1;i<=n;i++){
-    if(eq(q.left||[],teams[i])) L=i;
-    if(eq(q.right||[],teams[i])) R=i;
-  }
+  const L=bestTeamMatch(q.left||[], teams, n);
+  const R=bestTeamMatch(q.right||[], teams, n);
+  // 좌·우가 같은 팀으로 판정되면 판정 불가로 처리
+  if(L && R && L===R) return {L:null, R:null};
   return {L, R};
 }
 
@@ -1177,6 +1191,17 @@ async function persistQuarters(){
   const qs=(g.quarters||[]).map((existing,i)=>({...existing, ...readQuarterDom(i)}));
   await updateDoc(doc(db,"games",currentGameId),{quarters:qs});
 }
+/* 스코어 입력 시 즉시 저장하면 스냅샷→재렌더로 포커스 유실.
+   디바운스로 700ms 쉴 때만 저장. blur 시엔 즉시 저장. */
+let _qSaveTimer=null;
+function scheduleQuarterSave(){
+  clearTimeout(_qSaveTimer);
+  _qSaveTimer=setTimeout(()=>{_qSaveTimer=null; persistQuarters();},700);
+}
+function flushQuarterSave(){
+  if(_qSaveTimer){ clearTimeout(_qSaveTimer); _qSaveTimer=null; }
+  persistQuarters();
+}
 function currentMatchupKey(q, f){
   if(!f) return "";
   const eq=(a,b)=>a.length===b.length&&a.every(x=>b.includes(x));
@@ -1262,7 +1287,10 @@ function renderQuarters(g){
   });
   $$(".delq",wrap).forEach(b=>b.onclick=()=>delQuarter(+b.dataset.i));
   $$(".mu",wrap).forEach(b=>b.onclick=()=>applyMatchup(+b.dataset.q,+b.dataset.l,+b.dataset.r));
-  $$('#quartersWrap input[type="number"]').forEach(inp=>inp.addEventListener("input",persistQuarters));
+  $$('#quartersWrap input[type="number"]').forEach(inp=>{
+    inp.addEventListener("input",scheduleQuarterSave);
+    inp.addEventListener("blur",flushQuarterSave);
+  });
 }
 
 /* ============================================================
