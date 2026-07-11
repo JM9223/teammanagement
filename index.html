@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5d</span>
+      <span class="ver" id="verLabel">v1.5e</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5d";
+const APP_VERSION = "1.5e";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -914,15 +914,21 @@ function resolveQuarterTeams(q, g){
 
 /* 팀별 승/무/패 + 득실 종합 (일정 카드 & 경기 상세용) */
 function teamStandings(game){
-  const n=game.numTeams||2;
-  const stats={}, recorded={scored:0, custom:0};
+  const n=+game.numTeams||2;  // 문자열 방지
+  const stats={}, recorded={total:0, scored:0, unscored:0, oob:0, custom:0};
   for(let i=1;i<=n;i++) stats[i]={w:0,d:0,l:0,gf:0,ga:0};
   (game.quarters||[]).forEach(q=>{
-    if(q.scoreLeft==null||q.scoreRight==null) return;
+    recorded.total++;
+    if(q.scoreLeft==null||q.scoreRight==null||q.scoreLeft===""||q.scoreRight===""){
+      recorded.unscored++;
+      return;
+    }
     recorded.scored++;
     const {L, R}=resolveQuarterTeams(q, game);
     if(!L||!R){ recorded.custom++; return; }
+    if(!stats[L]||!stats[R]){ recorded.oob++; return; }  // 팀 번호가 numTeams 범위 밖 (이전에 3팀→2팀 전환 등)
     const sl=+q.scoreLeft, sr=+q.scoreRight;
+    if(Number.isNaN(sl)||Number.isNaN(sr)){ recorded.unscored++; return; }
     stats[L].gf+=sl; stats[L].ga+=sr;
     stats[R].gf+=sr; stats[R].ga+=sl;
     if(sl>sr){ stats[L].w++; stats[R].l++; }
@@ -933,7 +939,8 @@ function teamStandings(game){
 }
 function standingsHTML(game){
   const {stats,recorded,numTeams}=teamStandings(game);
-  if(recorded.scored===0) return "";
+  const counted=recorded.scored-recorded.custom-recorded.oob;
+  if(counted===0 && recorded.total===0) return "";
   const rows=[];
   for(let i=1;i<=numTeams;i++){
     const r=stats[i];
@@ -944,10 +951,13 @@ function standingsHTML(game){
       <span class="stand-gd">${r.gf} : ${r.ga}</span>
     </div>`);
   }
-  const usable=recorded.scored-recorded.custom;
-  const foot=recorded.custom>0?` · <span style="color:var(--txt-faint)">커스텀 조정 ${recorded.custom}쿼터 제외</span>`:"";
+  const notes=[];
+  notes.push(`집계 ${counted}쿼터`);
+  if(recorded.unscored>0) notes.push(`<span style="color:var(--rose)">스코어 미입력 ${recorded.unscored}쿼터</span>`);
+  if(recorded.custom>0) notes.push(`<span style="color:var(--txt-faint)">커스텀 조정 ${recorded.custom}쿼터</span>`);
+  if(recorded.oob>0) notes.push(`<span style="color:var(--rose)">팀번호 오류 ${recorded.oob}쿼터</span>`);
   return `<div class="standings">
-    <div class="stand-head">📊 팀 성적 <span style="color:var(--txt-faint);font-weight:400;">· 총 ${usable}쿼터 기록${foot}</span></div>
+    <div class="stand-head">📊 팀 성적 <span style="color:var(--txt-faint);font-weight:400;">· ${notes.join(" · ")}</span></div>
     ${rows.join("")}
   </div>`;
 }
@@ -1252,7 +1262,7 @@ function renderQuarters(g){
   });
   $$(".delq",wrap).forEach(b=>b.onclick=()=>delQuarter(+b.dataset.i));
   $$(".mu",wrap).forEach(b=>b.onclick=()=>applyMatchup(+b.dataset.q,+b.dataset.l,+b.dataset.r));
-  $$('#quartersWrap input[type="number"]').forEach(inp=>inp.addEventListener("change",persistQuarters));
+  $$('#quartersWrap input[type="number"]').forEach(inp=>inp.addEventListener("input",persistQuarters));
 }
 
 /* ============================================================
