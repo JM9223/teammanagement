@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5g</span>
+      <span class="ver" id="verLabel">v1.5h</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5g";
+const APP_VERSION = "1.5h";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -937,20 +937,24 @@ function resolveQuarterTeams(q, g){
 
 /* 팀별 승/무/패 + 득실 종합 (일정 카드 & 경기 상세용) */
 function teamStandings(game){
-  const n=+game.numTeams||2;  // 문자열 방지
+  const n=+game.numTeams||2;
   const stats={}, recorded={total:0, scored:0, unscored:0, oob:0, custom:0};
   for(let i=1;i<=n;i++) stats[i]={w:0,d:0,l:0,gf:0,ga:0};
-  (game.quarters||[]).forEach(q=>{
+  const qs=game.quarters||[];
+  qs.forEach((q, idx)=>{
     recorded.total++;
-    if(q.scoreLeft==null||q.scoreRight==null||q.scoreLeft===""||q.scoreRight===""){
-      recorded.unscored++;
-      return;
-    }
+    const hasL = q.scoreLeft!=null && q.scoreLeft!=="";
+    const hasR = q.scoreRight!=null && q.scoreRight!=="";
+    const isLast = idx === qs.length-1;
+    // 둘 다 비고 마지막 쿼터면 미입력 처리, 뒤에 쿼터가 있으면 0:0으로 인정
+    if(!hasL && !hasR && isLast){ recorded.unscored++; return; }
     recorded.scored++;
     const {L, R}=resolveQuarterTeams(q, game);
     if(!L||!R){ recorded.custom++; return; }
-    if(!stats[L]||!stats[R]){ recorded.oob++; return; }  // 팀 번호가 numTeams 범위 밖 (이전에 3팀→2팀 전환 등)
-    const sl=+q.scoreLeft, sr=+q.scoreRight;
+    if(!stats[L]||!stats[R]){ recorded.oob++; return; }
+    // 한 쪽만 입력됐으면 다른 쪽은 0으로 인식
+    const sl = hasL ? +q.scoreLeft : 0;
+    const sr = hasR ? +q.scoreRight : 0;
     if(Number.isNaN(sl)||Number.isNaN(sr)){ recorded.unscored++; return; }
     stats[L].gf+=sl; stats[L].ga+=sr;
     stats[R].gf+=sr; stats[R].ga+=sl;
