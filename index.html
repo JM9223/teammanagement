@@ -435,7 +435,7 @@ const APP_VERSION = "1.5h";
    브라우저·코드·저장소 어디에도 노출되지 않습니다.
    GAS URL 은 API 키와 달리 민감하지 않아 기본값으로 코드에 포함합니다
    (다른 GAS 로 바꾸려면 ⚙ 버튼으로 오버라이드). */
-const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbzpimZW2u65c4a458j62dbt97x4LHWfmZ-kMcEACXX8rsjIm-pdLZug4kH6Su1F3LT5/exec";
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycby7-Bwmbh3A8TvQYBYz4mfNf_nT4bJ0iRcDhRbFwaUzAvJNEYYHCXelNdAJAsIbwg-D/exec";
 const GAS_URL_STORE = "fs_gas_url";
 const getGasUrl = () => localStorage.getItem(GAS_URL_STORE) || DEFAULT_GAS_URL;
 const setGasUrl = u => localStorage.setItem(GAS_URL_STORE, u.trim());
