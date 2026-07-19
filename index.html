@@ -275,7 +275,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5h</span>
+      <span class="ver" id="verLabel">v1.5i</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -428,7 +428,7 @@ import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5h";
+const APP_VERSION = "1.5i";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -551,31 +551,44 @@ $("#gurlRefresh").onclick=async()=>{
 async function callGemini(prompt){
   const gasUrl=getGasUrl();
   if(!gasUrl){ openSettings(); throw new Error("GAS 프록시 URL이 설정되지 않았습니다 (⚙ 버튼)"); }
-  // GAS 가 모델 폴백 처리 (~22초 이내). 클라이언트는 28초 타임아웃 + 1회 재시도.
+  // GAS 가 모델 폴백 처리 (~45초 이내). 클라이언트는 55초 타임아웃 + 1회 재시도.
+  const t0=Date.now();
   let data, lastErr;
   for(let i=0;i<2;i++){
     const ctrl=new AbortController();
-    const t=setTimeout(()=>ctrl.abort(),28000);
+    const t=setTimeout(()=>ctrl.abort(),55000);
     try{
       const res=await fetch(gasUrl,{ method:"POST", body:JSON.stringify({prompt}), signal:ctrl.signal });
       clearTimeout(t);
-      if(!res.ok) throw new Error("프록시 응답 오류 "+res.status);
+      if(!res.ok){
+        const bodyText=await res.text().catch(()=>"");
+        console.error("[callGemini] 프록시 응답 오류", {status:res.status, body:bodyText.slice(0,500)});
+        throw new Error("프록시 응답 오류 "+res.status);
+      }
       data=await res.json();
+      console.info(`[callGemini] 응답 성공 (${Date.now()-t0}ms)`, {model:data.model, modelIndex:data.modelIndex, hasError:!!data.error});
       break;
     }catch(e){
       clearTimeout(t);
+      const elapsed=Date.now()-t0;
+      console.error(`[callGemini] 시도 ${i+1} 실패 (${elapsed}ms)`, e);
       lastErr = e.name==="AbortError"
-        ? new Error("AI 응답이 너무 지연됩니다 (Gemini 과부하). 잠시 후 다시 시도하세요.")
+        ? new Error(`AI 응답이 너무 지연됩니다 (${Math.round(elapsed/1000)}초). Gemini 과부하 가능성. 잠시 후 다시 시도하세요.`)
         : (e.message && e.message.includes("Failed to fetch")
             ? new Error("프록시 연결 실패 — 잠시 후 다시 시도하세요.") : e);
       if(i<1) await new Promise(r=>setTimeout(r,2000));
     }
   }
-  if(!data) throw lastErr||new Error("프록시 응답 없음");
-  if(data.error) throw new Error(data.error);
+  if(!data){ console.error("[callGemini] 최종 실패 — 응답 없음", lastErr); throw lastErr||new Error("프록시 응답 없음"); }
+  if(data.error){ console.error("[callGemini] GAS 프록시가 에러 반환", data); throw new Error(data.error); }
   if(data.model) lastUsedModel=data.model;
   if(data.modelIndex>0) toast(`AI 폴백: ${data.model} 사용`);
-  return JSON.parse((data.text||"").replace(/```json|```/g,"").trim());
+  try{
+    return JSON.parse((data.text||"").replace(/```json|```/g,"").trim());
+  }catch(e){
+    console.error("[callGemini] JSON 파싱 실패", {text:data.text, err:e});
+    throw new Error("AI 응답 파싱 실패: "+e.message);
+  }
 }
 let lastUsedModel="";
 
@@ -1158,7 +1171,7 @@ ${badPairs}
 }`;
 
     const out=await callGemini(prompt);
-    console.info("AI balance analysis:", out.analysis);
+    console.info("[aiBalance] AI 분석 결과", out);
     const ids=new Set((g.participants||[]).map(p=>p.id));
     const teams=(out.teams||[]).map(t=>t.filter(id=>ids.has(id)));
     const used=new Set(teams.flat());
@@ -1167,7 +1180,10 @@ ${badPairs}
     await saveGame({formation:f});
     const rb=$("#balanceReason"); rb.style.display="block"; rb.textContent="🪄 AI 편성 근거\n"+(out.reasoning||"");
     toast("AI 균형 편성 완료");
-  }catch(e){toast("AI 편성 실패: "+e.message,true);}
+  }catch(e){
+    console.error("[aiBalance] AI 팀편성 실패", {error:e, message:e.message, participants:g?.participants?.length, numTeams:g?.numTeams});
+    toast("AI 편성 실패: "+e.message,true);
+  }
   finally{btn.disabled=false;btn.innerHTML=orig;}
 };
 
@@ -1390,11 +1406,14 @@ ${badPairs}
   "reasoning": "선정 근거 (3~4문장, 한국어). 어떤 조합/시너지 때문에 뽑았는지 구체적으로"
 }`;
     const out=await callGemini(prompt);
-    console.info("Best team analysis:", out.analysis);
+    console.info("[bestFind] AI 분석 결과", out);
     const valid=new Set(members.map(m=>m.id));
     const team=(out.team||[]).filter(id=>valid.has(id)).slice(0,bestTeamSize);
     renderBestResult(team,out.reasoning,digest);
-  }catch(e){toast("AI 분석 실패: "+e.message,true);}
+  }catch(e){
+    console.error("[bestFind] Best 팀 AI 실패", {error:e, message:e.message, bestTeamSize, mustCount:must.length});
+    toast("AI 분석 실패: "+e.message,true);
+  }
   finally{btn.disabled=false;btn.innerHTML=orig;}
 };
 function renderBestResult(teamIds,reasoning,digest){
