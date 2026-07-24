@@ -277,11 +277,12 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v2.1a</span>
+      <span class="ver" id="verLabel">v2.1b</span>
       <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="calibrate" style="margin-left:14px;align-self:center;">📈 예측 보정</button>
-      <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:8px;align-self:center;">⚙ AI 프록시</button>
+      <span id="calibDate" class="ver" style="align-self:center;margin-left:6px;"></span>
+      <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:10px;align-self:center;">⚙ AI 프록시</button>
     </div>
     <nav class="tabs">
       <button class="tab active" data-tab="members">회원</button>
@@ -447,7 +448,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "2.1a";
+const APP_VERSION = "2.1b";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -553,9 +554,10 @@ function calibrateModel(){
   const model=fitScoreModel(statDigest());
   localStorage.setItem(SCORE_MODEL_STORE, JSON.stringify({...model, fittedAt:Date.now()}));
   if(currentGameId){ const g=getGame(currentGameId); if(g) renderLocalScore(g); }
-  const w=Math.round(model.n/(model.n+FIT_PRIOR)*100);
+  updateCalibLabel();
+  const w=Math.round(model.effN/(model.effN+FIT_PRIOR)*100);
   $("#calibBody").innerHTML=`
-    <p style="margin-bottom:12px">저장된 <b style="color:var(--gold)">${model.n}쿼터</b>의 실제 결과로 예측 가중치를 다시 맞췄습니다.</p>
+    <p style="margin-bottom:12px">저장된 <b style="color:var(--gold)">${model.n}쿼터</b> 전체를 <b>최근 경기에 더 큰 가중치</b>로 학습했습니다 (유효 표본 ${model.effN.toFixed(1)}).</p>
     <div style="background:var(--bg-soft);border:1px solid var(--line-soft);border-radius:10px;padding:12px 14px;line-height:2;font-size:13.5px">
       · 팀당 평균 득점: <b style="color:var(--txt)">${model.base.toFixed(2)}</b><br>
       · 실력차 감도: <b style="color:var(--txt)">${model.skillSens.toFixed(3)}</b><br>
@@ -563,13 +565,25 @@ function calibrateModel(){
       · 평균 예측 오차: <b style="color:var(--txt)">±${model.mae.toFixed(2)}골</b> (득실차 기준)
     </div>
     <p style="font-size:12px;color:var(--txt-faint);margin-top:12px;line-height:1.6">
-      데이터를 <b>${w}%</b> 반영 (나머지는 안정화를 위해 기본값). 표본이 적을수록 기본값에 가까워지며, 경기가 쌓인 뒤 다시 누르면 데이터를 더 신뢰합니다.
+      데이터를 <b>${w}%</b> 반영 (나머지는 안정화를 위해 기본값). 최근 ${RECENCY_HALFLIFE}일 이전 경기는 가중치가 절반씩 감쇠합니다. 경기가 쌓인 뒤 다시 누르면 데이터를 더 신뢰합니다.
     </p>`;
   $("#calibBg").classList.add("show");
   toast(`예측 보정 완료 — ${model.n}쿼터 학습`);
 }
 $("#calibrate").onclick=calibrateModel;
 $("#calibClose").onclick=()=>$("#calibBg").classList.remove("show");
+/* 헤더의 "최근 보정" 날짜 라벨 갱신 */
+function updateCalibLabel(){
+  const el=$("#calibDate"); if(!el) return;
+  const m=getScoreModel();
+  if(m.fittedAt){
+    const d=new Date(m.fittedAt);
+    el.textContent=`보정 ${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+    el.title=`최근 예측 보정: ${d.toLocaleString("ko-KR")} · ${m.n}쿼터 학습`;
+  }else{
+    el.textContent="미보정"; el.title="아직 예측 보정을 하지 않았습니다";
+  }
+}
 $("#settingsCancel").onclick=()=>$("#settingsBg").classList.remove("show");
 $("#gurlSave").onclick=()=>{
   const u=$("#gurlInput").value.trim();
@@ -987,6 +1001,7 @@ const OBJ_GEN=2.0;      // 여성 회원 고른 분산
 const OBJ_GUEST=1.4;    // 게스트 고른 분산
 // 스코어 회귀 모델 기본값 (표본 적으면 이 값으로 축소). FIT_PRIOR↑ = 데이터를 덜 믿음(안정)
 const BASE_DEF=3, SKILL_SENS_DEF=0.14, SYN_SENS_DEF=0.10, FIT_PRIOR=12;
+const RECENCY_HALFLIFE=120;   // 회귀 시 이 일수만큼 오래된 경기는 가중치 절반 (전체 사용·최근 우선)
 const SCORE_MODEL_STORE="fs_score_model";   // 보정된 가중치 저장 (버튼으로 갱신)
 
 function playerSkill(digest,pid){
@@ -1077,33 +1092,40 @@ function localFormation(digest,g,n){
 /* 스코어 회귀: 과거 쿼터로 fit. base=팀당 평균 득점, 감도=2변수 최소제곱, 둘 다 기본값으로 축소.
    (teamSkill/teamSynergy 가 해당 쿼터를 포함해 약한 누수 있으나, 축소로 완화된 휴리스틱) */
 function fitScoreModel(digest){
-  const pts=[];
-  games.forEach(gg=>(gg.quarters||[]).forEach(q=>{
-    const L=q.left||[], R=q.right||[];
-    if(!L.length||!R.length||q.scoreLeft==null||q.scoreRight==null||q.scoreLeft===""||q.scoreRight==="") return;
-    const sl=+q.scoreLeft, sr=+q.scoreRight;
-    if(Number.isNaN(sl)||Number.isNaN(sr)) return;
-    pts.push({x1:teamSkill(digest,L)-teamSkill(digest,R), x2:teamSynergy(digest,L)-teamSynergy(digest,R), d:sl-sr, tot:sl+sr});
-  }));
+  const pts=[]; let newest=0;
+  games.forEach(gg=>{
+    const t=gg.date?Date.parse(gg.date):0;
+    (gg.quarters||[]).forEach(q=>{
+      const L=q.left||[], R=q.right||[];
+      if(!L.length||!R.length||q.scoreLeft==null||q.scoreRight==null||q.scoreLeft===""||q.scoreRight==="") return;
+      const sl=+q.scoreLeft, sr=+q.scoreRight;
+      if(Number.isNaN(sl)||Number.isNaN(sr)) return;
+      if(t>newest) newest=t;
+      pts.push({x1:teamSkill(digest,L)-teamSkill(digest,R), x2:teamSynergy(digest,L)-teamSynergy(digest,R), d:sl-sr, tot:sl+sr, t});
+    });
+  });
   const n=pts.length;
-  const base=(pts.reduce((a,p)=>a+p.tot,0)/2 + BASE_DEF*FIT_PRIOR)/(n+FIT_PRIOR);
+  // 최근 경기 가중 (오래될수록 지수 감쇠). 전체 데이터를 다 쓰되 최근을 더 신뢰.
+  pts.forEach(p=>{ const ageDays=(newest-p.t)/864e5; p.w=Math.pow(0.5, Math.max(0,ageDays)/RECENCY_HALFLIFE); });
+  const W=pts.reduce((a,p)=>a+p.w,0);    // 유효 표본(가중합)
+  const base=(pts.reduce((a,p)=>a+p.w*p.tot/2,0) + BASE_DEF*FIT_PRIOR)/(W+FIT_PRIOR);
   let S11=0,S22=0,S12=0,Sy1=0,Sy2=0;
-  pts.forEach(p=>{ S11+=p.x1*p.x1; S22+=p.x2*p.x2; S12+=p.x1*p.x2; Sy1+=p.x1*p.d; Sy2+=p.x2*p.d; });
+  pts.forEach(p=>{ S11+=p.w*p.x1*p.x1; S22+=p.w*p.x2*p.x2; S12+=p.w*p.x1*p.x2; Sy1+=p.w*p.x1*p.d; Sy2+=p.w*p.x2*p.d; });
   const det=S11*S22-S12*S12;
   let b1=SKILL_SENS_DEF, b2=SYN_SENS_DEF;
   if(Math.abs(det)>1e-6){ b1=(Sy1*S22-Sy2*S12)/det; b2=(S11*Sy2-S12*Sy1)/det; }
-  const w=n/(n+FIT_PRIOR);               // 표본 적을수록 기본값으로 축소
+  const w=W/(W+FIT_PRIOR);               // 유효표본 적을수록 기본값으로 축소
   b1=Math.max(0,Math.min(0.5, w*b1+(1-w)*SKILL_SENS_DEF));
   b2=Math.max(-0.2,Math.min(0.5, w*b2+(1-w)*SYN_SENS_DEF));
-  // 평균 예측 오차(득실차 기준, in-sample)
-  let se=0;
-  pts.forEach(p=>{ se+=Math.abs(Math.max(-5,Math.min(5,p.x1*b1+p.x2*b2))-p.d); });
-  return {base, skillSens:b1, synSens:b2, n, mae:n?se/n:0};
+  // 가중 평균 예측 오차(득실차 기준, in-sample)
+  let se=0, sw=0;
+  pts.forEach(p=>{ se+=p.w*Math.abs(Math.max(-5,Math.min(5,p.x1*b1+p.x2*b2))-p.d); sw+=p.w; });
+  return {base, skillSens:b1, synSens:b2, n, effN:W, mae:sw?se/sw:0};
 }
 /* 저장된 보정 가중치 (📈 예측 보정 버튼으로 갱신). 없으면 기본값. */
 function getScoreModel(){
   try{ const m=JSON.parse(localStorage.getItem(SCORE_MODEL_STORE)); if(m&&typeof m.base==="number") return m; }catch(e){}
-  return {base:BASE_DEF, skillSens:SKILL_SENS_DEF, synSens:SYN_SENS_DEF, n:0, mae:0, fittedAt:null};
+  return {base:BASE_DEF, skillSens:SKILL_SENS_DEF, synSens:SYN_SENS_DEF, n:0, effN:0, mae:0, fittedAt:null};
 }
 function expectedScore(model,digest,idsA,idsB){
   const skillGap=teamSkill(digest,idsA)-teamSkill(digest,idsB);
@@ -1694,6 +1716,7 @@ function renderBestResult(teamIds,reasoning,digest){
 updateSortUI();
 updateBestSizeUI();
 updateNetUI();
+updateCalibLabel();
 $("#sDate").value=new Date().toISOString().slice(0,10);
 </script>
 </body>
