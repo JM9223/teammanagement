@@ -59,6 +59,8 @@
   }
   .logo .dot{width:9px;height:9px;border-radius:50%;background:var(--teal);box-shadow:0 0 12px var(--teal);}
   .ver{font-size:12px;color:var(--txt-faint);font-weight:600;letter-spacing:.5px;}
+  .net-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:99px;background:rgba(227,106,126,.15);color:var(--rose);border:1px solid rgba(227,106,126,.3);animation:pulse 1.8s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.5;}}
   .tagline{margin-left:auto;font-size:12px;color:var(--txt-faint);}
 
   nav.tabs{display:flex;gap:4px;margin-top:14px;overflow-x:auto;scrollbar-width:none;}
@@ -275,7 +277,8 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.5i</span>
+      <span class="ver" id="verLabel">v1.7a</span>
+      <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
     </div>
@@ -351,10 +354,12 @@
           <button data-n="3">3팀</button>
         </div>
         <button class="btn btn-ghost btn-sm" id="aiBalance">🪄 자동 균형 편성 (AI)</button>
+        <button class="btn btn-ghost btn-sm" id="predictScore">🔮 스코어 예측 (AI)</button>
         <button class="btn btn-ghost btn-sm" id="resetFormation">초기화</button>
       </div>
       <div class="team-board" id="teamBoard"></div>
       <div class="ai-reason" id="balanceReason" style="display:none;"></div>
+      <div class="ai-reason" id="predictReason" style="display:none;white-space:normal;"></div>
 
       <div class="sec-title" style="margin:28px 0 4px;"><h2>쿼터별 경기 기록</h2></div>
       <p class="sec-sub">팀 편성을 기본값으로 불러옵니다. 드래그로 출전/벤치를 조정하고 스코어를 입력하세요.</p>
@@ -421,14 +426,15 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getFirestore, collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+         collection, doc, addDoc, setDoc, deleteDoc, updateDoc,
          onSnapshot, getDocs, serverTimestamp, query, orderBy }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.5i";
+const APP_VERSION = "1.7a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -451,8 +457,21 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db  = getFirestore(app);
+/* 오프라인 지속성(IndexedDB) — 네트워크가 끊겨도 로컬 캐시로 계속 동작,
+   재연결 시 자동 동기화. 여러 탭 동시 사용도 안전(persistentMultipleTabManager). */
+const db  = initializeFirestore(app, {
+  localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+});
 document.getElementById("verLabel").textContent = "v" + APP_VERSION;
+
+/* ---- 온라인/오프라인 상태 UI ---- */
+function updateNetUI(){
+  const off = !navigator.onLine;
+  const b = document.getElementById("netBadge");
+  if(b) b.hidden = !off;
+}
+window.addEventListener("online",  ()=>{ updateNetUI(); toast("온라인 — 동기화 재개"); });
+window.addEventListener("offline", ()=>{ updateNetUI(); toast("오프라인 — 변경사항은 로컬에 저장됩니다",true); });
 
 /* ============================================================
    STATE
@@ -905,11 +924,14 @@ function statDigest(){
     .map(([k,v])=>{
       const [a,b]=k.split("|");
       return {pair:k, ids:[a,b], names:[nameOf(a),nameOf(b)],
-              together:v.together, winRate:Math.round(v.won/v.together*100)};
+              together:v.together, won:v.won, winRate:Math.round(v.won/v.together*100)};
     })
     .sort((a,b)=>b.winRate-a.winRate);
   return {players,synergy};
 }
+/* 표본 보정 승률 — 표본이 적을수록 50%로 끌어당김 (k = 사전분포 무게, 쿼터 단위).
+   3쿼터 2승(67%) 같은 노이즈가 "좋은 조합"으로 둔갑하는 걸 막는다. */
+function adjRate(won,total,k){ return Math.round((won+k*0.5)/(total+k)*100); }
 function winRateOf(pid){
   const {stat}=computeStats(); const s=stat[pid];
   return s&&s.played?Math.round(s.won/s.played*100):null;
@@ -1050,6 +1072,8 @@ function renderGameDetail(id){
   $("#gdTitle").textContent=g.title||"";
   $("#gdPartCount").textContent=(g.participants||[]).length+"명";
   $("#gdStandings").innerHTML=standingsHTML(g);
+  // 다른 경기의 AI 결과가 남지 않도록 초기화
+  $("#predictReason").style.display="none";
   // team count seg
   $$("#teamCountSeg button").forEach(b=>b.classList.toggle("on",+b.dataset.n===(g.numTeams||2)));
   renderTeamBoard(g);
@@ -1115,77 +1139,189 @@ $("#aiBalance").onclick=async()=>{
   try{
     const n=g.numTeams||2;
     const digest=statDigest();
-    // 참석자를 읽기 쉬운 텍스트로
+    const K_PLAYER=10, K_PAIR=8;   // 표본 보정 강도 (쿼터 단위)
+    const SKILL_GAP=10;            // 실력 가드레일 — 이 이하면 균형 통과로 간주
+
+    // 참석자 — 실력은 표본 보정된 단일 수치로. 모델이 원시 승률을 재해석하지 않게 한다.
     const partsText=(g.participants||[]).map(p=>{
       const s=digest.players.find(x=>x.id===p.id);
       const gtag=p.gender==="M"?"남":"여";
-      if(p.isGuest) return `- ${p.name} [id:${p.id}, ${gtag}, 게스트(실력미상)]`;
-      const pl=s?.played||0, w=s?.won||0, wr=s?.winRate;
-      if(pl<3) return `- ${p.name} [id:${p.id}, ${gtag}, ${pl}경기 ${w}승 (${wr??"?"}%) — 표본부족]`;
-      return `- ${p.name} [id:${p.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%)]`;
+      if(p.isGuest) return `- ${p.name} [id:${p.id}] ${gtag} 실력50 (게스트·기록없음)`;
+      const pl=s?.played||0, w=s?.won||0;
+      return `- ${p.name} [id:${p.id}] ${gtag} 실력${adjRate(w,pl,K_PLAYER)} (${pl}쿼터)`;
     }).join("\n");
+
+    // 페어 시너지 — 보정 승률의 50% 대비 편차(±점). 표본 적은 페어는 자동으로 0에 수렴.
     const participantIds=new Set((g.participants||[]).map(p=>p.id));
-    // 참석자간 페어만 필터
-    const relevantSynergy=digest.synergy.filter(s=>
-      participantIds.has(s.ids[0])&&participantIds.has(s.ids[1])&&s.together>=3);
-    const goodPairs=relevantSynergy
-      .filter(s=>s.winRate>=60)
-      .slice(0,12)
-      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
-      .join("\n")||"(해당 없음)";
-    const badPairs=relevantSynergy
-      .filter(s=>s.winRate<=40)
-      .sort((a,b)=>a.winRate-b.winRate)
-      .slice(0,12)
-      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
-      .join("\n")||"(해당 없음)";
+    const pairs=digest.synergy
+      .filter(s=>participantIds.has(s.ids[0])&&participantIds.has(s.ids[1])&&s.together>=4)
+      .map(s=>({names:s.names, together:s.together, score:adjRate(s.won,s.together,K_PAIR)-50}));
+    const fmtPairs=arr=>arr.map(p=>
+      `- ${p.names.join(" + ")} : ${p.score>0?"+":""}${p.score}점 (${p.together}쿼터)`).join("\n")||"(해당 없음)";
+    const goodPairs=fmtPairs(pairs.filter(p=>p.score>=5).sort((a,b)=>b.score-a.score).slice(0,10));
+    const badPairs =fmtPairs(pairs.filter(p=>p.score<=-5).sort((a,b)=>a.score-b.score).slice(0,10));
 
-    const prompt=`너는 풋살 팀 편성 전문가다. 아래 참석자를 ${n}개 팀으로 균형있게 분배해라.
+    const prompt=`너는 풋살 팀 편성 전문가다. 아래 참석자를 ${n}개 팀으로 나눠라.
 
-【목표 (우선순위 순)】
-1. 각 팀의 실력 총합(개인 승률 합계)이 최대한 균등하게
-2. "좋은 조합"의 선수들은 같은 팀에 유지 (실전에서 승률 좋았던 조합)
-3. "나쁜 조합"의 선수들은 서로 다른 팀으로 분리 (실전에서 부진했던 조합)
-4. 게스트는 각 팀에 균등 분배
-5. 팀 인원 최대 1명 차이
+【핵심 원칙】
+개인 실력 수치를 맞추는 것보다 "실제로 함께 뛰었을 때 잘 맞았던 조합"을 살리는 것이 우선이다.
+실력 균형은 달성해야 할 목표가 아니라 넘지만 않으면 되는 하한선이다.
 
-【해석 주의】
-- 3경기 미만 선수의 승률은 표본 부족, 50%에 가깝게 보정해 해석
-- 게스트는 실력 미상, 50%로 간주하고 분산 배치
-- "좋은/나쁜 조합" 통계는 실제 경기 결과 기반이라 개인 승률만큼 중요한 신호
+【하드 제약 — 반드시 지킬 것】
+- 참석자 전원을 정확히 한 팀에만 배정 (누락·중복 금지)
+- 팀 간 인원 차이 최대 1명
+- id는 주어진 문자열을 그대로 사용
+
+【최적화 우선순위】
+1. 시너지 총합 최대화 — 같은 팀이 된 페어들의 시너지 점수 합계(전체 팀 합산)를 가장 크게
+2. 마이너스 페어 분리 — 음수 점수 페어는 서로 다른 팀으로 (절댓값 큰 것부터)
+3. 시너지 쏠림 방지 — 좋은 조합이 한 팀에만 몰리지 않게, 팀별 시너지 합도 비슷하게
+4. 실력 가드레일 — 팀 평균 실력 차이가 ${SKILL_GAP} 이하이기만 하면 충분.
+   ${SKILL_GAP} 이하 구간에서 실력 차를 더 줄이려고 1~3번을 희생하지 말 것
+5. 게스트와 여성 회원은 각 팀에 고르게 분산
+
+【수치 읽는 법】
+- 실력, 시너지 점수 모두 표본 수가 이미 반영된 보정값이다. 추가 해석·재보정 하지 말 것
+- 시너지 점수는 50% 대비 편차. 절댓값이 클수록 강한 신호
+- 목록에 없는 페어는 0점(중립)이며 감점 사유가 아니다
 
 【참석자】
 ${partsText}
 
-【좋은 조합 (같은 팀에 유지 권장)】
+【플러스 조합 (같은 팀 권장)】
 ${goodPairs}
 
-【나쁜 조합 (다른 팀으로 분리 권장)】
+【마이너스 조합 (분리 권장)】
 ${badPairs}
 
-반드시 아래 JSON 형식으로만 응답:
+【작업 순서】
+① 플러스 페어를 점수 높은 순으로 같은 팀에 묶는다 (겹치면 덩어리로 함께 이동)
+② 마이너스 페어가 같은 팀에 남지 않도록 조정
+③ 남은 인원으로 인원수를 맞추고 팀 평균 실력 차가 ${SKILL_GAP} 이하인지 확인
+④ 초과하면 점수가 가장 낮은 플러스 페어부터 하나씩 풀어 재조정
+
+아래 JSON만 출력:
 {
-  "analysis": "① 팀별 실력 합 산출  ② 좋은 조합 배치  ③ 나쁜 조합 분리  ④ 게스트 분배 — 4단계 상세 설명",
   "teams": [["id",...],["id",...]${n===3?',["id",...]':""}],
-  "reasoning": "사용자에게 보여줄 편성 근거 (2~3문장, 한국어). 어떤 조합을 붙였고 어떤 걸 뗐는지 구체적으로 언급"
+  "check": {"kept":["같은 팀으로 묶은 플러스 페어 (이름+이름)"],"split":["분리한 마이너스 페어"],"skillGap":팀평균실력_최대차_숫자},
+  "reasoning": "사용자에게 보여줄 편성 근거 (2~3문장, 한국어). 어떤 조합을 붙였고 어떤 걸 뗐는지 구체적으로"
 }`;
 
     const out=await callGemini(prompt);
     console.info("[aiBalance] AI 분석 결과", out);
     const ids=new Set((g.participants||[]).map(p=>p.id));
-    const teams=(out.teams||[]).map(t=>t.filter(id=>ids.has(id)));
-    const used=new Set(teams.flat());
-    const f={pool:(g.participants||[]).map(p=>p.id).filter(id=>!used.has(id)),
+    // 모델이 id 대신 이름을 뱉는 경우가 있어 이름으로도 한 번 더 매칭
+    const byName=new Map((g.participants||[]).map(p=>[String(p.name).replace(/\s/g,""),p.id]));
+    const seen=new Set();
+    const teams=(out.teams||[]).map(t=>(t||[]).map(v=>{
+      const k=String(v).replace(/\s/g,"");
+      const id=ids.has(String(v))?String(v):byName.get(k);
+      if(!id||seen.has(id))return null;   // 미매칭·중복 배정 제거
+      seen.add(id); return id;
+    }).filter(Boolean));
+    const f={pool:(g.participants||[]).map(p=>p.id).filter(id=>!seen.has(id)),
              team1:teams[0]||[],team2:teams[1]||[],team3:teams[2]||[]};
     await saveGame({formation:f});
     const rb=$("#balanceReason"); rb.style.display="block"; rb.textContent="🪄 AI 편성 근거\n"+(out.reasoning||"");
-    toast("AI 균형 편성 완료");
+    if(f.pool.length) toast(`${f.pool.length}명은 AI가 배정하지 못해 대기 명단에 남았습니다`,true);
+    else toast("AI 균형 편성 완료");
   }catch(e){
     console.error("[aiBalance] AI 팀편성 실패", {error:e, message:e.message, participants:g?.participants?.length, numTeams:g?.numTeams});
     toast("AI 편성 실패: "+e.message,true);
   }
   finally{btn.disabled=false;btn.innerHTML=orig;}
 };
+
+/* ---- AI 스코어 예측 (현재 팀 편성 기반) ---- */
+$("#predictScore").onclick=async()=>{
+  const g=getGame(currentGameId); if(!g)return;
+  const n=g.numTeams||2;
+  const f=readBoardFormation();   // 화면의 현재 편성을 그대로 사용
+  const teamKeys=n===3?["team1","team2","team3"]:["team1","team2"];
+  if(teamKeys.some(k=>!(f[k]||[]).length))
+    return toast("먼저 모든 팀에 선수를 배정하세요",true);
+
+  const btn=$("#predictScore"); const orig=btn.innerHTML;
+  btn.disabled=true; btn.innerHTML=`<span class="spinner gold"></span> 예측 중...`;
+  try{
+    const digest=statDigest();
+    const K_PLAYER=10, K_PAIR=8;
+    const teamBlock=(key,label)=>{
+      const ids=f[key]||[];
+      const lines=ids.map(pid=>{
+        const p=pById(g,pid); if(!p)return"";
+        const s=digest.players.find(x=>x.id===pid);
+        const gtag=p.gender==="M"?"남":"여";
+        if(p.isGuest||!s?.played) return `  · ${p.name}(${gtag}) 실력50 (기록없음)`;
+        return `  · ${p.name}(${gtag}) 실력${adjRate(s.won,s.played,K_PLAYER)} (${s.played}쿼터)`;
+      }).filter(Boolean).join("\n");
+      const idset=new Set(ids);
+      const syn=digest.synergy
+        .filter(x=>idset.has(x.ids[0])&&idset.has(x.ids[1])&&x.together>=4)
+        .map(x=>({names:x.names, score:adjRate(x.won,x.together,K_PAIR)-50}))
+        .filter(x=>Math.abs(x.score)>=5).sort((a,b)=>b.score-a.score).slice(0,6);
+      const synText=syn.length
+        ? syn.map(x=>`  ~ ${x.names.join("+")} ${x.score>0?"+":""}${x.score}점`).join("\n")
+        : "  ~ (특이 조합 없음)";
+      return `${label} (${ids.length}명)\n${lines}\n 팀내 조합:\n${synText}`;
+    };
+    const teamsText=teamKeys.map((k,i)=>teamBlock(k,`${i+1}팀`)).join("\n\n");
+    const matchups=n===3?"1팀 vs 2팀, 1팀 vs 3팀, 2팀 vs 3팀":"1팀 vs 2팀";
+
+    const prompt=`너는 풋살 경기 결과 예측 분석가다. 아래 팀 편성으로 각 대진의 "한 쿼터" 예상 스코어를 예측하라.
+
+【수치 읽는 법】
+- 실력: 표본 보정된 승률 기반 수치(50=평균). 이미 표본이 반영됨, 재해석 금지
+- 조합: 두 선수가 같은 팀일 때의 시너지(50% 대비 편차). +는 강함, -는 약함
+- 게스트·기록없음은 평균(실력50)으로 간주
+
+【팀 편성】
+${teamsText}
+
+【예측할 대진】
+${matchups}
+
+【예측 규칙】
+- 풋살 한 쿼터의 현실적 점수대(대개 0~5골)로. 팀 실력·시너지 차이를 점수차에 반영
+- 실력이 비슷하면 근소한 차 또는 무승부도 가능
+- confidence: 두 팀 실력차가 뚜렷하면 "상", 애매하면 "하", 중간이면 "중"
+
+아래 JSON만 출력:
+{
+  "predictions": [
+    {"match":"1팀 vs 2팀","score":[정수,정수],"confidence":"상|중|하","note":"한 줄 근거(한국어)"}${n===3?"\n    /* 나머지 대진도 동일 형식으로 */":""}
+  ],
+  "reasoning": "전체 예측 요약 (2~3문장, 한국어). 어느 팀이 왜 유리한지"
+}`;
+
+    const out=await callGemini(prompt);
+    console.info("[predictScore] AI 예측 결과", out);
+    renderPrediction(out);
+  }catch(e){
+    console.error("[predictScore] 스코어 예측 실패",{error:e, message:e.message});
+    toast("스코어 예측 실패: "+e.message,true);
+  }finally{ btn.disabled=false; btn.innerHTML=orig; }
+};
+function renderPrediction(out){
+  const box=$("#predictReason"); box.style.display="block";
+  const preds=Array.isArray(out.predictions)?out.predictions:[];
+  if(!preds.length){ box.innerHTML=`<div style="color:var(--txt-faint)">예측 결과를 받지 못했습니다.</div>`; return; }
+  const confColor={상:"var(--teal)",중:"var(--gold)",하:"var(--txt-faint)"};
+  const rows=preds.map(p=>{
+    const sc=Array.isArray(p.score)?p.score:[];
+    const a=Number.isFinite(sc[0])?sc[0]:"?";
+    const b=Number.isFinite(sc[1])?sc[1]:"?";
+    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;flex-wrap:wrap;border-top:1px dashed var(--line-soft);">
+      <span style="font-weight:700;min-width:96px">${esc(p.match||"")}</span>
+      <span style="font-family:'Courier New',monospace;font-weight:800;font-size:18px;color:var(--gold);min-width:64px">${a} : ${b}</span>
+      <span style="font-size:11px;font-weight:700;color:${confColor[p.confidence]||"var(--txt-faint)"}">신뢰도 ${esc(p.confidence||"-")}</span>
+      ${p.note?`<span style="font-size:12.5px;color:var(--txt-dim);flex:1;min-width:140px">${esc(p.note)}</span>`:""}
+    </div>`;
+  }).join("");
+  box.innerHTML=`<div style="font-weight:700;color:var(--gold);margin-bottom:6px">🔮 AI 스코어 예측 <span style="font-size:11px;color:var(--txt-faint);font-weight:400">· 과거 기록 기반 참고용, 실제 결과와 다를 수 있습니다</span></div>
+    ${rows}
+    ${out.reasoning?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft);color:var(--txt-dim);line-height:1.6">${esc(out.reasoning)}</div>`:""}`;
+}
 
 /* ============================================================
    3.3 QUARTERS
@@ -1356,26 +1492,26 @@ $("#bestFind").onclick=async()=>{
   btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> AI 분석 중...`;
   try{
     const digest=statDigest();
-    // 회원별 통계 텍스트
+    const K_PLAYER=10, K_PAIR=8;   // 표본 보정 강도 — aiBalance 와 동일
+
+    // 회원별 실력은 표본 보정된 단일 수치로. 모델이 원시 승률을 재해석하지 않게 한다.
     const rosterText=members.map(m=>{
       const s=digest.players.find(x=>x.id===m.id);
       const gtag=m.gender==="M"?"남":"여";
-      const pl=s?.played||0, w=s?.won||0, wr=s?.winRate;
-      if(!pl) return `- ${m.name} [id:${m.id}, ${gtag}, 기록 없음]`;
-      if(pl<3) return `- ${m.name} [id:${m.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%) — 표본부족]`;
-      return `- ${m.name} [id:${m.id}, ${gtag}, ${pl}경기 ${w}승 (${wr}%)]`;
+      const pl=s?.played||0, w=s?.won||0;
+      if(!pl) return `- ${m.name} [id:${m.id}] ${gtag} 실력50 (기록없음)`;
+      return `- ${m.name} [id:${m.id}] ${gtag} 실력${adjRate(w,pl,K_PLAYER)} (${pl}쿼터)`;
     }).join("\n");
+
+    // 페어 시너지 — 보정 승률의 50% 대비 편차(±점). 표본 적은 페어는 자동으로 0에 수렴.
     const memberIds=new Set(members.map(m=>m.id));
-    const relevantSynergy=digest.synergy.filter(s=>
-      memberIds.has(s.ids[0])&&memberIds.has(s.ids[1])&&s.together>=3);
-    const goodPairs=relevantSynergy
-      .filter(s=>s.winRate>=60).slice(0,15)
-      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
-      .join("\n")||"(해당 없음)";
-    const badPairs=relevantSynergy
-      .filter(s=>s.winRate<=40).sort((a,b)=>a.winRate-b.winRate).slice(0,10)
-      .map(s=>`- ${s.names.join(" + ")} : ${s.together}회 함께, 승률 ${s.winRate}%`)
-      .join("\n")||"(해당 없음)";
+    const pairs=digest.synergy
+      .filter(s=>memberIds.has(s.ids[0])&&memberIds.has(s.ids[1])&&s.together>=4)
+      .map(s=>({names:s.names, together:s.together, score:adjRate(s.won,s.together,K_PAIR)-50}));
+    const fmtPairs=arr=>arr.map(p=>
+      `- ${p.names.join(" + ")} : ${p.score>0?"+":""}${p.score}점 (${p.together}쿼터)`).join("\n")||"(해당 없음)";
+    const goodPairs=fmtPairs(pairs.filter(p=>p.score>=5).sort((a,b)=>b.score-a.score).slice(0,12));
+    const badPairs =fmtPairs(pairs.filter(p=>p.score<=-5).sort((a,b)=>a.score-b.score).slice(0,10));
     const mustNames=must.map(id=>members.find(m=>m.id===id)?.name);
 
     const prompt=`너는 풋살 데이터 분석가다. 아래 회원 중 가장 강하고 잘 맞는 "베스트 ${bestTeamSize}인" 조합을 선정하라.
@@ -1385,25 +1521,30 @@ $("#bestFind").onclick=async()=>{
 정확히 ${bestTeamSize}명을 선택 (필수 포함 회원 포함).
 
 【선정 기준 (우선순위)】
-1. 필수 회원과 함께했을 때 승률 좋았던 조합 우선 (좋은 페어 데이터)
-2. 개인 승률 높은 회원 우선
-3. 나쁜 조합(서로 안 맞는 페어)은 함께 뽑지 말 것
-4. 표본 부족(경기수 3 미만)이나 기록 없는 회원의 승률은 신뢰도 낮게 해석 (50%에 근접)
+1. 필수 회원과 시너지 좋은(플러스 점수) 파트너를 우선 확보
+2. 선택된 회원들끼리도 플러스 조합이 많도록, 시너지 총합 최대화
+3. 마이너스 조합은 함께 뽑지 말 것 (절댓값 큰 것부터 회피)
+4. 위 조건이 비슷하면 개인 실력이 높은 회원 우선
 
-【전체 회원 및 개인 통계】
+【수치 읽는 법】
+- 실력, 시너지 점수 모두 표본 수가 이미 반영된 보정값이다. 추가 해석·재보정 하지 말 것
+- 시너지 점수는 50% 대비 편차. 절댓값이 클수록 강한 신호
+- 목록에 없는 페어는 0점(중립)이며 감점 사유가 아니다
+
+【전체 회원 및 개인 실력】
 ${rosterText}
 
-【좋은 조합】
+【플러스 조합 (함께 뽑기 권장)】
 ${goodPairs}
 
-【나쁜 조합 (같이 뽑지 말 것)】
+【마이너스 조합 (함께 뽑지 말 것)】
 ${badPairs}
 
-반드시 아래 JSON 형식으로만 응답:
+아래 JSON만 출력:
 {
-  "analysis": "① 필수 회원의 좋은 페어 파트너 후보 나열  ② 나쁜 조합 회피 확인  ③ 최종 7인 총 실력 확인 — 단계별 상세 설명",
   "team": ["회원id",...${bestTeamSize}개],
-  "reasoning": "선정 근거 (3~4문장, 한국어). 어떤 조합/시너지 때문에 뽑았는지 구체적으로"
+  "check": {"kept":["함께 뽑은 플러스 페어 (이름+이름)"],"avoided":["회피한 마이너스 페어"]},
+  "reasoning": "선정 근거 (2~3문장, 한국어). 어떤 조합/시너지 때문에 뽑았는지 구체적으로"
 }`;
     const out=await callGemini(prompt);
     console.info("[bestFind] AI 분석 결과", out);
@@ -1439,6 +1580,7 @@ function renderBestResult(teamIds,reasoning,digest){
 /* init */
 updateSortUI();
 updateBestSizeUI();
+updateNetUI();
 $("#sDate").value=new Date().toISOString().slice(0,10);
 </script>
 </body>
