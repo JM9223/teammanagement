@@ -277,7 +277,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.8c</span>
+      <span class="ver" id="verLabel">v2.0a</span>
       <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
@@ -353,8 +353,8 @@
           <button data-n="2" class="on">2팀</button>
           <button data-n="3">3팀</button>
         </div>
-        <button class="btn btn-ghost btn-sm" id="aiBalance">🪄 자동 균형 편성 (AI)</button>
-        <button class="btn btn-ghost btn-sm" id="predictScore">🔮 AI 정밀 예측</button>
+        <button class="btn btn-ghost btn-sm" id="aiBalance">🪄 자동 균형 편성</button>
+        <button class="btn btn-ghost btn-sm" id="predictScore">💬 Gemini 설명</button>
         <button class="btn btn-ghost btn-sm" id="resetFormation">초기화</button>
       </div>
       <div class="team-board" id="teamBoard"></div>
@@ -435,7 +435,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.8c";
+const APP_VERSION = "2.0a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -939,18 +939,18 @@ function winRateOf(pid){
 }
 
 /* ============================================================
-   전력 기반 예상 스코어 엔진 (로컬·즉시 — AI 호출 없음)
-   팀 편성의 균형 점검·자동 조정과 예상 스코어 표시에 사용.
-   "팀별 상성" = 두 팀의 종합 전력(개인 실력 평균 + 팀내 시너지) 비교.
-   개인 상성은 표본이 얇고 노이즈가 커서 팀 단위 집계로 대체.
+   로컬 엔진 — 팀 편성 + 스코어 예측 (AI 호출 없음·즉시·결정론적)
+   과거 기록 전체를 읽어 로컬에서 계산한다. Gemini 는 결과 "해석"만 담당.
    ============================================================ */
-const GOAL_BASE=3;      // 풋살 한 쿼터 팀당 기본 득점 기대치
-const SKILL_SENS=0.14;  // 개인 실력차 → 스코어 스윙(감도)
-const SYN_SENS=0.10;    // 시너지 조합 전적차 → 스코어 스윙 ("일부 조정": 실력보다 작게)
-const BALANCE_GAP=8;    // 팀 전력차가 이 값을 넘으면 조정
-const SYN_WEIGHT=0.8;   // 분배용 teamRating 에서 시너지 비중
 const SYN_MIN=3;        // 이 쿼터수 이상 함께 뛴 페어만 시너지로 인정
 const K_PAIR=8;         // 페어 승률 표본 보정 강도
+// 편성 목적함수 가중치 (휴리스틱 — 실데이터로 조정 여지)
+const OBJ_SYN=1.0;      // 좋은 조합 같은 팀 / 나쁜 조합 분리
+const OBJ_BAL=1.6;      // 팀 실력 균형
+const OBJ_GEN=2.0;      // 여성 회원 고른 분산
+const OBJ_GUEST=1.4;    // 게스트 고른 분산
+// 스코어 회귀 모델 기본값 (표본 적으면 이 값으로 축소)
+const BASE_DEF=3, SKILL_SENS_DEF=0.14, SYN_SENS_DEF=0.10, FIT_PRIOR=6;
 
 function playerSkill(digest,pid){
   const s=digest.players.find(x=>x.id===pid);
@@ -960,101 +960,139 @@ function teamSkill(digest,ids){
   if(!ids||!ids.length) return 50;
   return ids.reduce((a,pid)=>a+playerSkill(digest,pid),0)/ids.length;
 }
-/* 팀내 시너지 조합 전적 = 같은 팀 페어들의 "50% 대비 편차(adjRate)"를 신뢰도 가중평균.
-   · 편차는 adjRate 로 표본 보정 → 얇은 페어는 자동으로 0(중립)에 수렴
-   · 신뢰도(conf) = 함께 뛴 쿼터 많을수록 ↑ → 검증된 조합이 평균을 주도
-   · 전적 있는 페어만 반영, 없으면 0. 데이터 쌓일수록 신호 강해짐 (표본 부족 걱정 불필요) */
+/* 팀내 시너지 조합 전적 = 같은 팀 페어 편차(adjRate)를 신뢰도 가중"평균" (스코어 예측용) */
 function teamSynergy(digest,ids){
   if(!ids||ids.length<2) return 0;
   const idset=new Set(ids);
   let sum=0, wsum=0;
   digest.synergy.forEach(x=>{
     if(!idset.has(x.ids[0])||!idset.has(x.ids[1])||x.together<SYN_MIN) return;
-    const dev=adjRate(x.won,x.together,K_PAIR)-50;   // 표본 보정된 시너지 편차
-    const conf=x.together/(x.together+K_PAIR);        // 표본 많을수록 신뢰 ↑
+    const dev=adjRate(x.won,x.together,K_PAIR)-50, conf=x.together/(x.together+K_PAIR);
     sum+=dev*conf; wsum+=conf;
   });
   return wsum? sum/wsum : 0;
 }
-/* 분배·균형용 팀 전력 = 개인 실력 + 시너지 (팀 나눌 때 좋은 조합을 살림) */
-function teamRating(digest,g,ids){
-  if(!ids||!ids.length) return 50;
-  return teamSkill(digest,ids) + SYN_WEIGHT*teamSynergy(digest,ids);
+/* 편성 목적함수용: 같은 팀 페어 시너지의 신뢰도 가중 "합" (좋은 조합 뭉치면↑, 나쁜 조합 뭉치면↓) */
+function synergyScore(digest,ids){
+  if(!ids||ids.length<2) return 0;
+  const idset=new Set(ids);
+  let sum=0;
+  digest.synergy.forEach(x=>{
+    if(!idset.has(x.ids[0])||!idset.has(x.ids[1])||x.together<SYN_MIN) return;
+    sum+=(adjRate(x.won,x.together,K_PAIR)-50)*(x.together/(x.together+K_PAIR));
+  });
+  return sum;
 }
-/* 예상 스코어 = 개인 실력차(base) + 시너지 조합 전적차(일부 조정).
-   두 팀 전력이 비슷해도, 보유한 시너지 조합의 전적 우열로 스코어가 갈릴 수 있다.
-   전적 없는 팀은 synGap=0 → 실력차만 반영 (있는 데이터만이라도 반영). */
-function expectedGoals(digest,g,idsA,idsB){
+/* 편성 품질 점수(↑좋음): 시너지 합 − 실력 불균형 − 성비 쏠림 − 게스트 쏠림 */
+function formationObjective(digest,g,teams){
+  const skills=teams.map(t=>teamSkill(digest,t));
+  const skillSpread=Math.max(...skills)-Math.min(...skills);
+  const synTotal=teams.reduce((a,t)=>a+synergyScore(digest,t),0);
+  const fem=teams.map(t=>t.filter(pid=>pById(g,pid)?.gender==="F").length);
+  const gst=teams.map(t=>t.filter(pid=>pById(g,pid)?.isGuest).length);
+  return OBJ_SYN*synTotal - OBJ_BAL*skillSpread
+       - OBJ_GEN*(Math.max(...fem)-Math.min(...fem))
+       - OBJ_GUEST*(Math.max(...gst)-Math.min(...gst));
+}
+/* 로컬 팀 편성: 실력 그리디 초기화 → 언덕오르기 교체 + 랜덤 재시작 */
+function localFormation(digest,g,n){
+  const ids=(g.participants||[]).map(p=>p.id);
+  const sizes=Array.from({length:n},(_,i)=>Math.floor(ids.length/n)+(i<ids.length%n?1:0));
+  const bySkill=[...ids].sort((a,b)=>playerSkill(digest,b)-playerSkill(digest,a));
+  const greedy=()=>{                     // 실력 합이 가장 낮은 팀에 차례로 배정
+    const teams=Array.from({length:n},()=>[]), sums=Array(n).fill(0);
+    bySkill.forEach(pid=>{
+      let t=-1;
+      for(let i=0;i<n;i++){ if(teams[i].length<sizes[i]&&(t<0||sums[i]<sums[t])) t=i; }
+      teams[t].push(pid); sums[t]+=playerSkill(digest,pid);
+    });
+    return teams;
+  };
+  const shuffled=()=>{
+    const arr=[...ids];
+    for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]]; }
+    const teams=[]; let k=0;
+    for(let i=0;i<n;i++){ teams.push(arr.slice(k,k+sizes[i])); k+=sizes[i]; }
+    return teams;
+  };
+  const climb=(teams)=>{
+    let improved=true;
+    while(improved){
+      improved=false;
+      let cur=formationObjective(digest,g,teams);
+      for(let ti=0;ti<n;ti++)for(let tj=ti+1;tj<n;tj++)
+        for(let ai=0;ai<teams[ti].length;ai++)for(let bi=0;bi<teams[tj].length;bi++){
+          const cand=teams.map(t=>[...t]);
+          [cand[ti][ai],cand[tj][bi]]=[cand[tj][bi],cand[ti][ai]];
+          const v=formationObjective(digest,g,cand);
+          if(v>cur+1e-6){ teams=cand; cur=v; improved=true; }
+        }
+    }
+    return teams;
+  };
+  let best=climb(greedy()), bestV=formationObjective(digest,g,best);
+  for(let r=0;r<5;r++){
+    const cand=climb(shuffled()), v=formationObjective(digest,g,cand);
+    if(v>bestV){ best=cand; bestV=v; }
+  }
+  return {pool:[],team1:best[0]||[],team2:best[1]||[],team3:best[2]||[]};
+}
+/* 스코어 회귀: 과거 쿼터로 fit. base=팀당 평균 득점, 감도=2변수 최소제곱, 둘 다 기본값으로 축소.
+   (teamSkill/teamSynergy 가 해당 쿼터를 포함해 약한 누수 있으나, 축소로 완화된 휴리스틱) */
+function fitScoreModel(digest){
+  const pts=[];
+  games.forEach(gg=>(gg.quarters||[]).forEach(q=>{
+    const L=q.left||[], R=q.right||[];
+    if(!L.length||!R.length||q.scoreLeft==null||q.scoreRight==null||q.scoreLeft===""||q.scoreRight==="") return;
+    const sl=+q.scoreLeft, sr=+q.scoreRight;
+    if(Number.isNaN(sl)||Number.isNaN(sr)) return;
+    pts.push({x1:teamSkill(digest,L)-teamSkill(digest,R), x2:teamSynergy(digest,L)-teamSynergy(digest,R), d:sl-sr, tot:sl+sr});
+  }));
+  const n=pts.length;
+  const base=(pts.reduce((a,p)=>a+p.tot,0)/2 + BASE_DEF*FIT_PRIOR)/(n+FIT_PRIOR);
+  let S11=0,S22=0,S12=0,Sy1=0,Sy2=0;
+  pts.forEach(p=>{ S11+=p.x1*p.x1; S22+=p.x2*p.x2; S12+=p.x1*p.x2; Sy1+=p.x1*p.d; Sy2+=p.x2*p.d; });
+  const det=S11*S22-S12*S12;
+  let b1=SKILL_SENS_DEF, b2=SYN_SENS_DEF;
+  if(Math.abs(det)>1e-6){ b1=(Sy1*S22-Sy2*S12)/det; b2=(S11*Sy2-S12*Sy1)/det; }
+  const w=n/(n+FIT_PRIOR);               // 표본 적을수록 기본값으로 축소
+  b1=Math.max(0,Math.min(0.5, w*b1+(1-w)*SKILL_SENS_DEF));
+  b2=Math.max(-0.2,Math.min(0.5, w*b2+(1-w)*SYN_SENS_DEF));
+  return {base, skillSens:b1, synSens:b2, n};
+}
+function expectedScore(model,digest,idsA,idsB){
   const skillGap=teamSkill(digest,idsA)-teamSkill(digest,idsB);
   const synGap  =teamSynergy(digest,idsA)-teamSynergy(digest,idsB);
-  const swing=Math.max(-4,Math.min(4, skillGap*SKILL_SENS + synGap*SYN_SENS));
-  return { a:Math.max(0,Math.round(GOAL_BASE+swing/2)),
-           b:Math.max(0,Math.round(GOAL_BASE-swing/2)),
-           margin:Math.abs(swing), skillGap, synGap };
+  const diff=Math.max(-5,Math.min(5, skillGap*model.skillSens + synGap*model.synSens));
+  return { a:Math.max(0,Math.round(model.base+diff/2)),
+           b:Math.max(0,Math.round(model.base-diff/2)),
+           margin:Math.abs(diff), skillGap, synGap };
 }
-/* 팀 전력차가 크면 강↔약 팀 간 1:1 교체로 스프레드를 줄인다. 교체 횟수 반환.
-   시너지가 전력(rating)에 이미 반영돼 있어, 전력차만 줄여도 시너지가 함께 고려됨. */
-function balanceByExpectedScore(digest,g,f,n){
-  const keys=n===3?["team1","team2","team3"]:["team1","team2"];
-  let swaps=0;
-  for(let iter=0;iter<30;iter++){
-    const ratings=keys.map(k=>teamRating(digest,g,f[k]||[]));
-    let hi=0,lo=0;
-    ratings.forEach((r,i)=>{ if(r>ratings[hi])hi=i; if(r<ratings[lo])lo=i; });
-    if(ratings[hi]-ratings[lo]<=BALANCE_GAP) break;
-    const A=f[keys[hi]]||[], B=f[keys[lo]]||[];
-    let best=null, bestSpread=ratings[hi]-ratings[lo];
-    for(const a of A) for(const b of B){
-      const rA=teamRating(digest,g,A.map(x=>x===a?b:x));
-      const rB=teamRating(digest,g,B.map(x=>x===b?a:x));
-      const rs=ratings.slice(); rs[hi]=rA; rs[lo]=rB;
-      const s=Math.max(...rs)-Math.min(...rs);
-      if(s<bestSpread-0.01){ bestSpread=s; best={a,b}; }
-    }
-    if(!best) break;   // 더 줄일 교체가 없으면 종료
-    f[keys[hi]]=A.map(x=>x===best.a?best.b:x);
-    f[keys[lo]]=B.map(x=>x===best.b?best.a:x);
-    swaps++;
-  }
-  return swaps;
-}
-/* 현재 편성의 예상 스코어 패널 (전 대진). 팀이 다 안 차면 숨김. */
-function renderExpectedScore(g){
+/* 현재 편성의 로컬 예상 스코어 패널 (전 대진). 편성 바뀔 때마다 즉시 갱신. */
+function renderLocalScore(g){
   const box=$("#expScore"); if(!box) return;
-  const n=g.numTeams||2;
-  const f=g.formation||{};
+  const n=g.numTeams||2, f=g.formation||{};
   const keys=n===3?["team1","team2","team3"]:["team1","team2"];
   if(keys.some(k=>!(f[k]||[]).length)){ box.style.display="none"; box.innerHTML=""; return; }
-  const digest=statDigest();
-  const idsOf={}, syns={};
-  keys.forEach((k,i)=>{ idsOf[i+1]=f[k]; syns[i+1]=teamSynergy(digest,f[k]); });
+  const digest=statDigest(), model=fitScoreModel(digest);
+  const idsOf={}; keys.forEach((k,i)=>idsOf[i+1]=f[k]);
   const pairs=n===3?[[1,2],[1,3],[2,3]]:[[1,2]];
   const rows=pairs.map(([x,y])=>{
-    const e=expectedGoals(digest,g,idsOf[x],idsOf[y]);
-    const big=e.margin>=1.5;
-    // 시너지 조합 전적이 이 대진에서 누구 편을 들었는지
-    const synTag=Math.abs(e.synGap)>=0.3
-      ? ` <span style="font-size:10px;color:var(--txt-faint)">시너지→${e.synGap>0?x:y}팀</span>` : "";
+    const e=expectedScore(model,digest,idsOf[x],idsOf[y]), big=e.margin>=1.5;
     return `<div class="stand-row">
       <span class="stand-tag t${x}">${x}팀</span>
       <span style="font-family:'Courier New',monospace;font-weight:800;font-size:16px;color:var(--gold)">${e.a} : ${e.b}</span>
       <span class="stand-tag t${y}">${y}팀</span>
-      <span class="stand-gd" style="color:${big?'var(--rose)':'var(--teal)'}">${big?'전력차 큼':'박빙'}${synTag}</span>
+      <span class="stand-gd" style="color:${big?'var(--rose)':'var(--teal)'}">${big?'우세 예상':'박빙'}</span>
     </div>`;
   }).join("");
-  // 팀별 시너지 조합 전적(±) 투명하게 노출
-  const synNote=keys.map((k,i)=>{
-    const v=syns[i+1], on=Math.abs(v)>=0.05;
-    return `<span style="color:${on?(v>0?'var(--teal)':'var(--rose)'):'var(--txt-faint)'}">${i+1}팀 ${v>=0?'+':''}${v.toFixed(1)}</span>`;
-  }).join(" · ");
+  const src=model.n>=8?`과거 ${model.n}쿼터 실측 회귀`:`데이터 ${model.n}쿼터 · 기본값 위주`;
   box.style.display="block";
   box.innerHTML=`<div class="standings" style="margin-top:0">
-    <div class="stand-head">📐 예상 스코어 <span style="color:var(--txt-faint);font-weight:400">· 개인 실력차 + 시너지 조합 전적 보정 · 참고용</span></div>
+    <div class="stand-head">📐 예상 스코어 <span style="color:var(--txt-faint);font-weight:400">· ${src} · 참고용</span></div>
     ${rows}
-    <div style="font-size:11px;color:var(--txt-faint);margin-top:8px;padding-top:8px;border-top:1px dashed var(--line-soft)">🤝 팀 시너지 전적: ${synNote}</div>
   </div>`;
 }
-
 /* 쿼터의 좌·우가 어느 팀인지 판정.
    ① 저장된 leftTeam/rightTeam 최우선
    ② 2팀 편성은 항상 좌=1/우=2 (대진 유일)
@@ -1225,7 +1263,7 @@ function renderTeamBoard(g){
     new Sortable(zone,{group:"teams",animation:150,ghostClass:"sortable-ghost",chosenClass:"sortable-chosen",
       onEnd:()=>persistFormation(g.id)});
   });
-  renderExpectedScore(g);   // 수동/AI 편성 모두 예상 스코어 표시
+  renderLocalScore(g);   // 수동/자동 편성 모두 로컬 예상 스코어 즉시 표시
 }
 function readBoardFormation(){
   const f={pool:[],team1:[],team2:[],team3:[]};
@@ -1250,125 +1288,38 @@ $("#resetFormation").onclick=async()=>{
   toast("초기화됨");
 };
 
-/* ---- AI 자동 균형 편성 ---- */
+/* ---- 자동 균형 편성 (로컬·즉시·결정론적) ----
+   과거 기록으로 시너지·실력·성비·게스트 균형을 함께 최적화. Gemini 호출 없음. */
 $("#aiBalance").onclick=async()=>{
   const g=getGame(currentGameId); if(!g)return;
+  const n=g.numTeams||2;
+  if((g.participants||[]).length<n) return toast(`참석 인원이 ${n}명 이상이어야 합니다`,true);
   const btn=$("#aiBalance"); const orig=btn.innerHTML;
-  btn.disabled=true; btn.innerHTML=`<span class="spinner gold"></span> 분석 중...`;
+  btn.disabled=true; btn.innerHTML=`<span class="spinner gold"></span> 편성 중...`;
+  await new Promise(r=>setTimeout(r,0));   // 스피너 페인트 후 계산
   try{
-    const n=g.numTeams||2;
     const digest=statDigest();
-    const K_PLAYER=10, K_PAIR=8;   // 표본 보정 강도 (쿼터 단위)
-    const SKILL_GAP=10;            // 실력 가드레일 — 이 이하면 균형 통과로 간주
-
-    // 참석자 — 실력은 표본 보정된 단일 수치로. 모델이 원시 승률을 재해석하지 않게 한다.
-    const partsText=(g.participants||[]).map(p=>{
-      const s=digest.players.find(x=>x.id===p.id);
-      const gtag=p.gender==="M"?"남":"여";
-      if(p.isGuest) return `- ${p.name} [id:${p.id}] ${gtag} 실력50 (게스트·기록없음)`;
-      const pl=s?.played||0, w=s?.won||0;
-      return `- ${p.name} [id:${p.id}] ${gtag} 실력${adjRate(w,pl,K_PLAYER)} (${pl}쿼터)`;
-    }).join("\n");
-
-    // 페어 시너지 — 보정 승률의 50% 대비 편차(±점). 표본 적은 페어는 자동으로 0에 수렴.
-    const participantIds=new Set((g.participants||[]).map(p=>p.id));
-    const pairs=digest.synergy
-      .filter(s=>participantIds.has(s.ids[0])&&participantIds.has(s.ids[1])&&s.together>=4)
-      .map(s=>({names:s.names, together:s.together, score:adjRate(s.won,s.together,K_PAIR)-50}));
-    const fmtPairs=arr=>arr.map(p=>
-      `- ${p.names.join(" + ")} : ${p.score>0?"+":""}${p.score}점 (${p.together}쿼터)`).join("\n")||"(해당 없음)";
-    const goodPairs=fmtPairs(pairs.filter(p=>p.score>=5).sort((a,b)=>b.score-a.score).slice(0,10));
-    const badPairs =fmtPairs(pairs.filter(p=>p.score<=-5).sort((a,b)=>a.score-b.score).slice(0,10));
-
-    const prompt=`너는 풋살 팀 편성 전문가다. 아래 참석자를 ${n}개 팀으로 나눠라.
-
-【핵심 원칙】
-개인 실력 수치를 맞추는 것보다 "실제로 함께 뛰었을 때 잘 맞았던 조합"을 살리는 것이 우선이다.
-실력 균형은 달성해야 할 목표가 아니라 넘지만 않으면 되는 하한선이다.
-
-【하드 제약 — 반드시 지킬 것】
-- 참석자 전원을 정확히 한 팀에만 배정 (누락·중복 금지)
-- 팀 간 인원 차이 최대 1명
-- id는 주어진 문자열을 그대로 사용
-
-【최적화 우선순위】
-1. 시너지 총합 최대화 — 같은 팀이 된 페어들의 시너지 점수 합계(전체 팀 합산)를 가장 크게
-2. 마이너스 페어 분리 — 음수 점수 페어는 서로 다른 팀으로 (절댓값 큰 것부터)
-3. 시너지 쏠림 방지 — 좋은 조합이 한 팀에만 몰리지 않게, 팀별 시너지 합도 비슷하게
-4. 실력 가드레일 — 팀 평균 실력 차이가 ${SKILL_GAP} 이하이기만 하면 충분.
-   ${SKILL_GAP} 이하 구간에서 실력 차를 더 줄이려고 1~3번을 희생하지 말 것
-5. 게스트와 여성 회원은 각 팀에 고르게 분산
-
-【수치 읽는 법】
-- 실력, 시너지 점수 모두 표본 수가 이미 반영된 보정값이다. 추가 해석·재보정 하지 말 것
-- 시너지 점수는 50% 대비 편차. 절댓값이 클수록 강한 신호
-- 목록에 없는 페어는 0점(중립)이며 감점 사유가 아니다
-
-【참석자】
-${partsText}
-
-【플러스 조합 (같은 팀 권장)】
-${goodPairs}
-
-【마이너스 조합 (분리 권장)】
-${badPairs}
-
-【작업 순서】
-① 플러스 페어를 점수 높은 순으로 같은 팀에 묶는다 (겹치면 덩어리로 함께 이동)
-② 마이너스 페어가 같은 팀에 남지 않도록 조정
-③ 남은 인원으로 인원수를 맞추고 팀 평균 실력 차가 ${SKILL_GAP} 이하인지 확인
-④ 초과하면 점수가 가장 낮은 플러스 페어부터 하나씩 풀어 재조정
-
-아래 JSON만 출력:
-{
-  "teams": [["id",...],["id",...]${n===3?',["id",...]':""}],
-  "check": {"kept":["같은 팀으로 묶은 플러스 페어 (이름+이름)"],"split":["분리한 마이너스 페어"],"skillGap":팀평균실력_최대차_숫자},
-  "reasoning": "사용자에게 보여줄 편성 근거 (2~3문장, 한국어). 어떤 조합을 붙였고 어떤 걸 뗐는지 구체적으로"
-}`;
-
-    const out=await callGemini(prompt);
-    console.info("[aiBalance] AI 분석 결과", out);
-    const ids=new Set((g.participants||[]).map(p=>p.id));
-    // 모델이 id 대신 이름을 뱉는 경우가 있어 이름으로도 한 번 더 매칭
-    const byName=new Map((g.participants||[]).map(p=>[String(p.name).replace(/\s/g,""),p.id]));
-    const seen=new Set();
-    const teams=(out.teams||[]).map(t=>(t||[]).map(v=>{
-      const k=String(v).replace(/\s/g,"");
-      const id=ids.has(String(v))?String(v):byName.get(k);
-      if(!id||seen.has(id))return null;   // 미매칭·중복 배정 제거
-      seen.add(id); return id;
-    }).filter(Boolean));
-    const f={pool:(g.participants||[]).map(p=>p.id).filter(id=>!seen.has(id)),
-             team1:teams[0]||[],team2:teams[1]||[],team3:teams[2]||[]};
-    // 편성 후 전력 기반 예상 스코어로 점검 → 차이가 크면 1:1 교체로 자동 조정
-    const swaps=balanceByExpectedScore(digest,g,f,n);
+    const f=localFormation(digest,g,n);
     await saveGame({formation:f});
-    let note=out.reasoning||"";
-    if(swaps>0) note+=`\n\n⚖ 전력 점검: 편성 후 팀 전력차가 커서 예상 스코어 기준 ${swaps}회 선수 교체로 자동 조정했습니다. (아래 📐 예상 스코어 참고)`;
-    const rb=$("#balanceReason"); rb.style.display="block"; rb.textContent="🪄 AI 편성 근거\n"+note;
-    if(f.pool.length) toast(`${f.pool.length}명은 AI가 배정하지 못해 대기 명단에 남았습니다`,true);
-    else toast(swaps>0?`AI 편성 + 전력 조정 ${swaps}회 완료`:"AI 균형 편성 완료");
+    const keys=n===3?["team1","team2","team3"]:["team1","team2"];
+    const skills=keys.map(k=>Math.round(teamSkill(digest,f[k])));
+    const rb=$("#balanceReason"); rb.style.display="block";
+    rb.textContent=`🪄 자동 편성 완료 — 팀 평균 실력 ${skills.join(" / ")}\n시너지 조합·실력·성비·게스트 균형을 함께 최적화했습니다. 근거 설명이 필요하면 💬 버튼.`;
+    toast("자동 균형 편성 완료");
   }catch(e){
-    console.error("[aiBalance] AI 팀편성 실패", {error:e, message:e.message, participants:g?.participants?.length, numTeams:g?.numTeams});
-    toast("AI 편성 실패: "+e.message,true);
+    console.error("[localFormation] 편성 실패", {error:e, message:e.message, participants:g?.participants?.length, numTeams:g?.numTeams});
+    toast("편성 실패: "+e.message,true);
   }
   finally{btn.disabled=false;btn.innerHTML=orig;}
 };
 
-/* ---- AI 스코어 예측 (현재 팀 편성 기반) ---- */
-$("#predictScore").onclick=async()=>{
-  const g=getGame(currentGameId); if(!g)return;
-  const n=g.numTeams||2;
-  const f=readBoardFormation();   // 화면의 현재 편성을 그대로 사용
-  const teamKeys=n===3?["team1","team2","team3"]:["team1","team2"];
-  if(teamKeys.some(k=>!(f[k]||[]).length))
-    return toast("먼저 모든 팀에 선수를 배정하세요",true);
-
-  const btn=$("#predictScore"); const orig=btn.innerHTML;
-  btn.disabled=true; btn.innerHTML=`<span class="spinner gold"></span> 예측 중...`;
-  try{
+/* ---- Gemini 설명 (로컬 편성·예상 스코어를 "해석"만) ----
+   runGeminiExplain: 로컬이 계산한 편성/예상 스코어를 받아, 새로 계산하지 말고
+   왜 이런 결과인지 자연어로 해설만 하도록 Gemini 에 요청 → #predictReason 렌더. */
+async function runGeminiExplain(g, f, n){
     const digest=statDigest();
-    const K_PLAYER=10, K_PAIR=8;
+    const model=fitScoreModel(digest);
+    const teamKeys=n===3?["team1","team2","team3"]:["team1","team2"];
     const teamBlock=(key,label)=>{
       const ids=f[key]||[];
       const lines=ids.map(pid=>{
@@ -1376,11 +1327,11 @@ $("#predictScore").onclick=async()=>{
         const s=digest.players.find(x=>x.id===pid);
         const gtag=p.gender==="M"?"남":"여";
         if(p.isGuest||!s?.played) return `  · ${p.name}(${gtag}) 실력50 (기록없음)`;
-        return `  · ${p.name}(${gtag}) 실력${adjRate(s.won,s.played,K_PLAYER)} (${s.played}쿼터)`;
+        return `  · ${p.name}(${gtag}) 실력${adjRate(s.won,s.played,10)} (${s.played}쿼터)`;
       }).filter(Boolean).join("\n");
       const idset=new Set(ids);
       const syn=digest.synergy
-        .filter(x=>idset.has(x.ids[0])&&idset.has(x.ids[1])&&x.together>=4)
+        .filter(x=>idset.has(x.ids[0])&&idset.has(x.ids[1])&&x.together>=SYN_MIN)
         .map(x=>({names:x.names, score:adjRate(x.won,x.together,K_PAIR)-50}))
         .filter(x=>Math.abs(x.score)>=5).sort((a,b)=>b.score-a.score).slice(0,6);
       const synText=syn.length
@@ -1389,61 +1340,54 @@ $("#predictScore").onclick=async()=>{
       return `${label} (${ids.length}명)\n${lines}\n 팀내 조합:\n${synText}`;
     };
     const teamsText=teamKeys.map((k,i)=>teamBlock(k,`${i+1}팀`)).join("\n\n");
-    const matchups=n===3?"1팀 vs 2팀, 1팀 vs 3팀, 2팀 vs 3팀":"1팀 vs 2팀";
+    const pairs=n===3?[[1,2],[1,3],[2,3]]:[[1,2]];
+    const scoreLines=pairs.map(([x,y])=>{
+      const e=expectedScore(model,digest,f[teamKeys[x-1]],f[teamKeys[y-1]]);
+      return `- ${x}팀 ${e.a} : ${e.b} ${y}팀`;
+    }).join("\n");
 
-    const prompt=`너는 풋살 경기 결과 예측 분석가다. 아래 팀 편성으로 각 대진의 "한 쿼터" 예상 스코어를 예측하라.
+    const prompt=`너는 풋살 해설가다. 아래는 로컬 알고리즘이 과거 기록으로 계산한 "팀 편성"과 "예상 스코어"다.
+네 역할은 새로 계산하는 것이 아니라, 이 결과를 사람이 이해하기 쉽게 해석·설명하는 것이다.
+편성이나 스코어를 바꾸지 말고, 주어진 숫자를 근거로 설명하라.
 
 【수치 읽는 법】
-- 실력: 표본 보정된 승률 기반 수치(50=평균). 이미 표본이 반영됨, 재해석 금지
-- 조합: 두 선수가 같은 팀일 때의 시너지(50% 대비 편차). +는 강함, -는 약함
-- 게스트·기록없음은 평균(실력50)으로 간주
+- 실력: 표본 보정된 승률 기반 수치(50=평균)
+- 조합: 같은 팀일 때 시너지(50% 대비 편차). +는 강함, -는 약함
 
 【팀 편성】
 ${teamsText}
 
-【예측할 대진】
-${matchups}
-
-【예측 규칙】
-- 풋살 한 쿼터의 현실적 점수대(대개 0~5골)로. 팀 실력·시너지 차이를 점수차에 반영
-- 실력이 비슷하면 근소한 차 또는 무승부도 가능
-- confidence: 두 팀 실력차가 뚜렷하면 "상", 애매하면 "하", 중간이면 "중"
+【로컬 예상 스코어 (이 숫자를 그대로 인용)】
+${scoreLines}
 
 아래 JSON만 출력:
 {
-  "predictions": [
-    {"match":"1팀 vs 2팀","score":[정수,정수],"confidence":"상|중|하","note":"한 줄 근거(한국어)"}${n===3?"\n    /* 나머지 대진도 동일 형식으로 */":""}
-  ],
-  "reasoning": "전체 예측 요약 (2~3문장, 한국어). 어느 팀이 왜 유리한지"
+  "reasoning": "편성과 예상 스코어 해설 (3~4문장, 한국어). 어느 팀이 왜 유리한지, 어떤 조합이 핵심인지, 균형은 어떤지 구체적으로. 스코어는 위 값을 그대로 인용."
 }`;
 
     const out=await callGemini(prompt);
-    console.info("[predictScore] AI 예측 결과", out);
-    renderPrediction(out);
-  }catch(e){
-    console.error("[predictScore] 스코어 예측 실패",{error:e, message:e.message});
-    toast("스코어 예측 실패: "+e.message,true);
+    console.info("[runGeminiExplain] 해석 결과", out);
+    renderExplain(out);
+}
+$("#predictScore").onclick=async()=>{
+  const g=getGame(currentGameId); if(!g)return;
+  const n=g.numTeams||2;
+  const f=readBoardFormation();   // 화면의 현재 편성
+  const teamKeys=n===3?["team1","team2","team3"]:["team1","team2"];
+  if(teamKeys.some(k=>!(f[k]||[]).length))
+    return toast("먼저 모든 팀에 선수를 배정하세요",true);
+  const btn=$("#predictScore"); const orig=btn.innerHTML;
+  btn.disabled=true; btn.innerHTML=`<span class="spinner gold"></span> 설명 생성 중...`;
+  try{ await runGeminiExplain(g,f,n); }
+  catch(e){
+    console.error("[geminiExplain] 실패",{error:e, message:e.message});
+    toast("Gemini 설명 실패: "+e.message,true);
   }finally{ btn.disabled=false; btn.innerHTML=orig; }
 };
-function renderPrediction(out){
+function renderExplain(out){
   const box=$("#predictReason"); box.style.display="block";
-  const preds=Array.isArray(out.predictions)?out.predictions:[];
-  if(!preds.length){ box.innerHTML=`<div style="color:var(--txt-faint)">예측 결과를 받지 못했습니다.</div>`; return; }
-  const confColor={상:"var(--teal)",중:"var(--gold)",하:"var(--txt-faint)"};
-  const rows=preds.map(p=>{
-    const sc=Array.isArray(p.score)?p.score:[];
-    const a=Number.isFinite(sc[0])?sc[0]:"?";
-    const b=Number.isFinite(sc[1])?sc[1]:"?";
-    return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;flex-wrap:wrap;border-top:1px dashed var(--line-soft);">
-      <span style="font-weight:700;min-width:96px">${esc(p.match||"")}</span>
-      <span style="font-family:'Courier New',monospace;font-weight:800;font-size:18px;color:var(--gold);min-width:64px">${a} : ${b}</span>
-      <span style="font-size:11px;font-weight:700;color:${confColor[p.confidence]||"var(--txt-faint)"}">신뢰도 ${esc(p.confidence||"-")}</span>
-      ${p.note?`<span style="font-size:12.5px;color:var(--txt-dim);flex:1;min-width:140px">${esc(p.note)}</span>`:""}
-    </div>`;
-  }).join("");
-  box.innerHTML=`<div style="font-weight:700;color:var(--gold);margin-bottom:6px">🔮 AI 스코어 예측 <span style="font-size:11px;color:var(--txt-faint);font-weight:400">· 과거 기록 기반 참고용, 실제 결과와 다를 수 있습니다</span></div>
-    ${rows}
-    ${out.reasoning?`<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--line-soft);color:var(--txt-dim);line-height:1.6">${esc(out.reasoning)}</div>`:""}`;
+  box.innerHTML=`<div style="font-weight:700;color:var(--gold);margin-bottom:6px">💬 Gemini 해석 <span style="font-size:11px;color:var(--txt-faint);font-weight:400">· 로컬 계산 결과에 대한 설명 · 참고용</span></div>
+    <div style="color:var(--txt-dim);line-height:1.65;white-space:pre-wrap">${esc(out.reasoning||"설명을 받지 못했습니다.")}</div>`;
 }
 
 /* ============================================================
