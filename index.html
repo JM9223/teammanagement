@@ -277,7 +277,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v1.8a</span>
+      <span class="ver" id="verLabel">v1.8c</span>
       <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="openSettings" style="margin-left:14px;align-self:center;">⚙ AI 프록시</button>
@@ -435,7 +435,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "1.8a";
+const APP_VERSION = "1.8c";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -945,28 +945,52 @@ function winRateOf(pid){
    개인 상성은 표본이 얇고 노이즈가 커서 팀 단위 집계로 대체.
    ============================================================ */
 const GOAL_BASE=3;      // 풋살 한 쿼터 팀당 기본 득점 기대치
-const SCORE_SENS=0.18;  // 전력차 1점당 스코어 스윙(감도)
-const BALANCE_GAP=8;    // 팀 전력차가 이 값을 넘으면 "많이 난다"고 보고 조정
+const SKILL_SENS=0.14;  // 개인 실력차 → 스코어 스윙(감도)
+const SYN_SENS=0.10;    // 시너지 조합 전적차 → 스코어 스윙 ("일부 조정": 실력보다 작게)
+const BALANCE_GAP=8;    // 팀 전력차가 이 값을 넘으면 조정
+const SYN_WEIGHT=0.8;   // 분배용 teamRating 에서 시너지 비중
+const SYN_MIN=3;        // 이 쿼터수 이상 함께 뛴 페어만 시너지로 인정
+const K_PAIR=8;         // 페어 승률 표본 보정 강도
 
 function playerSkill(digest,pid){
   const s=digest.players.find(x=>x.id===pid);
   return (s&&s.played)?adjRate(s.won,s.played,10):50;   // 게스트·무기록 = 평균 50
 }
+function teamSkill(digest,ids){
+  if(!ids||!ids.length) return 50;
+  return ids.reduce((a,pid)=>a+playerSkill(digest,pid),0)/ids.length;
+}
+/* 팀내 시너지 조합 전적 = 같은 팀 페어들의 "50% 대비 편차(adjRate)"를 신뢰도 가중평균.
+   · 편차는 adjRate 로 표본 보정 → 얇은 페어는 자동으로 0(중립)에 수렴
+   · 신뢰도(conf) = 함께 뛴 쿼터 많을수록 ↑ → 검증된 조합이 평균을 주도
+   · 전적 있는 페어만 반영, 없으면 0. 데이터 쌓일수록 신호 강해짐 (표본 부족 걱정 불필요) */
+function teamSynergy(digest,ids){
+  if(!ids||ids.length<2) return 0;
+  const idset=new Set(ids);
+  let sum=0, wsum=0;
+  digest.synergy.forEach(x=>{
+    if(!idset.has(x.ids[0])||!idset.has(x.ids[1])||x.together<SYN_MIN) return;
+    const dev=adjRate(x.won,x.together,K_PAIR)-50;   // 표본 보정된 시너지 편차
+    const conf=x.together/(x.together+K_PAIR);        // 표본 많을수록 신뢰 ↑
+    sum+=dev*conf; wsum+=conf;
+  });
+  return wsum? sum/wsum : 0;
+}
+/* 분배·균형용 팀 전력 = 개인 실력 + 시너지 (팀 나눌 때 좋은 조합을 살림) */
 function teamRating(digest,g,ids){
   if(!ids||!ids.length) return 50;
-  const skill=ids.reduce((a,pid)=>a+playerSkill(digest,pid),0)/ids.length;
-  const idset=new Set(ids);
-  const pairScores=digest.synergy
-    .filter(x=>idset.has(x.ids[0])&&idset.has(x.ids[1])&&x.together>=4)
-    .map(x=>adjRate(x.won,x.together,8)-50);
-  const syn=pairScores.length? pairScores.reduce((a,v)=>a+v,0)/pairScores.length : 0;
-  return skill + 0.5*syn;   // 개인 실력 + 팀내 시너지 평균의 절반
+  return teamSkill(digest,ids) + SYN_WEIGHT*teamSynergy(digest,ids);
 }
-function expectedGoals(rA,rB){
-  const swing=Math.max(-4,Math.min(4,(rA-rB)*SCORE_SENS));
+/* 예상 스코어 = 개인 실력차(base) + 시너지 조합 전적차(일부 조정).
+   두 팀 전력이 비슷해도, 보유한 시너지 조합의 전적 우열로 스코어가 갈릴 수 있다.
+   전적 없는 팀은 synGap=0 → 실력차만 반영 (있는 데이터만이라도 반영). */
+function expectedGoals(digest,g,idsA,idsB){
+  const skillGap=teamSkill(digest,idsA)-teamSkill(digest,idsB);
+  const synGap  =teamSynergy(digest,idsA)-teamSynergy(digest,idsB);
+  const swing=Math.max(-4,Math.min(4, skillGap*SKILL_SENS + synGap*SYN_SENS));
   return { a:Math.max(0,Math.round(GOAL_BASE+swing/2)),
            b:Math.max(0,Math.round(GOAL_BASE-swing/2)),
-           margin:Math.abs(swing) };
+           margin:Math.abs(swing), skillGap, synGap };
 }
 /* 팀 전력차가 크면 강↔약 팀 간 1:1 교체로 스프레드를 줄인다. 교체 횟수 반환.
    시너지가 전력(rating)에 이미 반영돼 있어, 전력차만 줄여도 시너지가 함께 고려됨. */
@@ -1002,22 +1026,32 @@ function renderExpectedScore(g){
   const keys=n===3?["team1","team2","team3"]:["team1","team2"];
   if(keys.some(k=>!(f[k]||[]).length)){ box.style.display="none"; box.innerHTML=""; return; }
   const digest=statDigest();
-  const ratings={}; keys.forEach((k,i)=>ratings[i+1]=teamRating(digest,g,f[k]));
+  const idsOf={}, syns={};
+  keys.forEach((k,i)=>{ idsOf[i+1]=f[k]; syns[i+1]=teamSynergy(digest,f[k]); });
   const pairs=n===3?[[1,2],[1,3],[2,3]]:[[1,2]];
   const rows=pairs.map(([x,y])=>{
-    const e=expectedGoals(ratings[x],ratings[y]);
+    const e=expectedGoals(digest,g,idsOf[x],idsOf[y]);
     const big=e.margin>=1.5;
+    // 시너지 조합 전적이 이 대진에서 누구 편을 들었는지
+    const synTag=Math.abs(e.synGap)>=0.3
+      ? ` <span style="font-size:10px;color:var(--txt-faint)">시너지→${e.synGap>0?x:y}팀</span>` : "";
     return `<div class="stand-row">
       <span class="stand-tag t${x}">${x}팀</span>
       <span style="font-family:'Courier New',monospace;font-weight:800;font-size:16px;color:var(--gold)">${e.a} : ${e.b}</span>
       <span class="stand-tag t${y}">${y}팀</span>
-      <span class="stand-gd" style="color:${big?'var(--rose)':'var(--teal)'}">${big?'전력차 큼':'박빙'}</span>
+      <span class="stand-gd" style="color:${big?'var(--rose)':'var(--teal)'}">${big?'전력차 큼':'박빙'}${synTag}</span>
     </div>`;
   }).join("");
+  // 팀별 시너지 조합 전적(±) 투명하게 노출
+  const synNote=keys.map((k,i)=>{
+    const v=syns[i+1], on=Math.abs(v)>=0.05;
+    return `<span style="color:${on?(v>0?'var(--teal)':'var(--rose)'):'var(--txt-faint)'}">${i+1}팀 ${v>=0?'+':''}${v.toFixed(1)}</span>`;
+  }).join(" · ");
   box.style.display="block";
   box.innerHTML=`<div class="standings" style="margin-top:0">
-    <div class="stand-head">📐 예상 스코어 <span style="color:var(--txt-faint);font-weight:400">· 전력(실력+시너지) 기반 · 참고용</span></div>
+    <div class="stand-head">📐 예상 스코어 <span style="color:var(--txt-faint);font-weight:400">· 개인 실력차 + 시너지 조합 전적 보정 · 참고용</span></div>
     ${rows}
+    <div style="font-size:11px;color:var(--txt-faint);margin-top:8px;padding-top:8px;border-top:1px dashed var(--line-soft)">🤝 팀 시너지 전적: ${synNote}</div>
   </div>`;
 }
 
