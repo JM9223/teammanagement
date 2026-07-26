@@ -277,7 +277,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v2.1b</span>
+      <span class="ver" id="verLabel">v2.1c</span>
       <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="calibrate" style="margin-left:14px;align-self:center;">📈 예측 보정</button>
@@ -448,7 +448,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "2.1b";
+const APP_VERSION = "2.1c";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -494,6 +494,7 @@ let members  = [];   // {id, name, gender}
 let schedules = [];  // {id, date, title, attendees:[mid], guests:[{id,name,gender}], closed}
 let games    = [];   // {id(=scheduleId), date, title, participants:[{id,name,gender,isGuest}], numTeams, formation, quarters}
 let currentGameId = null;
+let scoreModelCache = null;   // 보정 가중치 (Firestore meta/scoreModel 동기화)
 const TEAM_KEYS = ["pool","team1","team2","team3"];
 const TEAM_LABEL = {pool:"대기 명단",team1:"1팀",team2:"2팀",team3:"3팀"};
 
@@ -549,10 +550,13 @@ function openSettings(){
 $("#openSettings").onclick=openSettings;
 
 /* ---- 예측 가중치 보정 (저장된 전 경기로 재학습) ---- */
-function calibrateModel(){
+async function calibrateModel(){
   if(!games.length) return toast("저장된 경기 데이터가 없습니다",true);
-  const model=fitScoreModel(statDigest());
-  localStorage.setItem(SCORE_MODEL_STORE, JSON.stringify({...model, fittedAt:Date.now()}));
+  const model={...fitScoreModel(statDigest()), fittedAt:Date.now()};
+  scoreModelCache=model;
+  try{ localStorage.setItem(SCORE_MODEL_STORE, JSON.stringify(model)); }catch(e){}   // 빠른 캐시
+  // Firestore 저장 → 새로고침·다른 기기에서도 유지
+  setDoc(doc(db,"meta","scoreModel"), model).catch(e=>{ console.error("[calibrate] 저장 실패",e); toast("보정 저장 실패(로컬만 반영): "+e.message,true); });
   if(currentGameId){ const g=getGame(currentGameId); if(g) renderLocalScore(g); }
   updateCalibLabel();
   const w=Math.round(model.effN/(model.effN+FIT_PRIOR)*100);
@@ -690,6 +694,11 @@ onSnapshot(collection(db,"games"),snap=>{
 onSnapshot(doc(db,"meta","memberOrder"),snap=>{
   memberOrderIds = snap.exists() ? (snap.data().ids || []) : [];
   if(sortKey==="custom"){ renderMembers(); renderScheduleList(); renderBestPicks(); }
+});
+onSnapshot(doc(db,"meta","scoreModel"),snap=>{
+  scoreModelCache = snap.exists() ? snap.data() : null;
+  updateCalibLabel();
+  if(currentGameId){ const g=getGame(currentGameId); if(g) renderLocalScore(g); }
 });
 const getGame=id=>games.find(g=>g.id===id);
 
@@ -1122,8 +1131,9 @@ function fitScoreModel(digest){
   pts.forEach(p=>{ se+=p.w*Math.abs(Math.max(-5,Math.min(5,p.x1*b1+p.x2*b2))-p.d); sw+=p.w; });
   return {base, skillSens:b1, synSens:b2, n, effN:W, mae:sw?se/sw:0};
 }
-/* 저장된 보정 가중치 (📈 예측 보정 버튼으로 갱신). 없으면 기본값. */
+/* 저장된 보정 가중치. Firestore(기기 간 동기화) 우선 → localStorage 폴백 → 기본값. */
 function getScoreModel(){
+  if(scoreModelCache && typeof scoreModelCache.base==="number") return scoreModelCache;
   try{ const m=JSON.parse(localStorage.getItem(SCORE_MODEL_STORE)); if(m&&typeof m.base==="number") return m; }catch(e){}
   return {base:BASE_DEF, skillSens:SKILL_SENS_DEF, synSens:SYN_SENS_DEF, n:0, effN:0, mae:0, fittedAt:null};
 }
