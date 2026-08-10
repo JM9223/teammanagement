@@ -187,9 +187,20 @@
   .team-col .tc-meta{font-size:11px;color:var(--txt-faint);margin-bottom:10px;}
   .team-col .dot-c{width:10px;height:10px;border-radius:3px;}
   .col-pool .dot-c{background:var(--txt-faint);}
-  .col-1 .dot-c{background:var(--blue);}
-  .col-2 .dot-c{background:var(--rose);}
-  .col-3 .dot-c{background:var(--teal);}
+  .col-1 .dot-c{background:#fff;box-shadow:0 0 0 1px var(--line);}   /* A = 흰색 */
+  .col-2 .dot-c{background:var(--blue);}                              /* B = 파랑 */
+  .col-3 .dot-c{background:#e2ff3d;}                                  /* C = 형광노랑 */
+  /* 이름 옆 팀 배정 버튼 (A/B/C 클릭 편성) */
+  .player-chip .assign{margin-left:auto;display:flex;gap:4px;flex:0 0 auto;}
+  .ab{width:24px;height:24px;padding:0;border-radius:7px;border:1.5px solid var(--line);background:var(--bg-soft);
+      font-family:inherit;font-weight:800;font-size:12px;line-height:1;cursor:pointer;display:grid;place-items:center;transition:.12s;}
+  .ab-a{color:#dfe7f2;}
+  .ab-b{color:var(--blue);}
+  .ab-c{color:#c9e21a;}
+  .ab:hover{transform:scale(1.12);border-color:currentColor;}
+  .ab-a.on{background:#fff;color:#141414;border-color:#fff;}
+  .ab-b.on{background:var(--blue);color:#fff;border-color:var(--blue);}
+  .ab-c.on{background:#e2ff3d;color:#1a1a00;border-color:#e2ff3d;}
   .dropzone{display:flex;flex-direction:column;gap:7px;min-height:60px;}
   .player-chip{
     display:flex;align-items:center;gap:9px;background:var(--bg-soft);
@@ -221,6 +232,12 @@
   .q-side.right h5{color:var(--rose);}
   .q-score{display:flex;flex-direction:row;align-items:center;gap:8px;padding-top:14px;justify-content:center;}
   .q-score input{width:54px;text-align:center;font-size:20px;font-weight:800;padding:8px;}
+  .q-score input.bump{animation:bump .28s ease;}
+  @keyframes bump{0%{transform:scale(1);}40%{transform:scale(1.28);color:var(--gold);}100%{transform:scale(1);}}
+  h5.q-tap{cursor:pointer;user-select:none;border-radius:8px;padding:4px 7px;margin:-2px -3px 8px;transition:.12s;-webkit-tap-highlight-color:transparent;}
+  h5.q-tap:hover{background:rgba(255,255,255,.06);}
+  h5.q-tap:active{transform:scale(.95);background:rgba(255,255,255,.1);}
+  .tap-hint{font-size:9px;font-weight:700;color:var(--txt-faint);border:1px solid var(--line);border-radius:5px;padding:1px 5px;letter-spacing:0;}
   .q-score .colon{color:var(--txt-faint);font-weight:800;font-size:18px;}
   .q-bench{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);}
   .q-bench h5{font-size:11px;color:var(--txt-faint);font-weight:700;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px;}
@@ -235,9 +252,9 @@
   .stand-row{display:flex;gap:10px;align-items:center;padding:4px 0;font-size:13.5px;}
   .stand-row+.stand-row{border-top:1px dashed var(--line-soft);}
   .stand-tag{font-size:11px;font-weight:800;padding:2px 8px;border-radius:99px;border:1px solid;flex:0 0 auto;}
-  .stand-tag.t1{background:rgba(91,141,239,.12);color:var(--blue);border-color:rgba(91,141,239,.4);}
-  .stand-tag.t2{background:rgba(227,106,126,.12);color:var(--rose);border-color:rgba(227,106,126,.4);}
-  .stand-tag.t3{background:rgba(70,196,180,.12);color:var(--teal);border-color:rgba(70,196,180,.4);}
+  .stand-tag.t1{background:rgba(255,255,255,.12);color:#f2f6fc;border-color:rgba(255,255,255,.45);}  /* A 흰 */
+  .stand-tag.t2{background:rgba(91,141,239,.14);color:var(--blue);border-color:rgba(91,141,239,.45);} /* B 파랑 */
+  .stand-tag.t3{background:rgba(226,255,61,.14);color:#e2ff3d;border-color:rgba(226,255,61,.5);}       /* C 노랑 */
   .stand-rec{font-weight:600;}
   .stand-gd{margin-left:auto;color:var(--txt-faint);font-family:'Courier New',monospace;font-weight:700;}
 
@@ -277,7 +294,7 @@
   <div class="head-inner">
     <div class="brand">
       <div class="logo"><span class="dot"></span><span class="fs">FS</span> <span style="font-weight:300;color:var(--txt-dim)">simple</span></div>
-      <span class="ver" id="verLabel">v2.1c</span>
+      <span class="ver" id="verLabel">v2.3a</span>
       <span class="net-badge" id="netBadge" hidden>● 오프라인</span>
       <span class="tagline">풋살 일정 · 팀편성 관리</span>
       <button class="btn btn-ghost btn-sm" id="calibrate" style="margin-left:14px;align-self:center;">📈 예측 보정</button>
@@ -448,7 +465,7 @@ import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager
 /* ============================================================
    CONFIG  — 수정 시 APP_VERSION 을 올리세요 (예: 1.0a → 1.0b → 1.1a)
    ============================================================ */
-const APP_VERSION = "2.1c";
+const APP_VERSION = "2.3a";
 
 /* AI 호출은 GAS 프록시(Web App)를 통해서만 합니다.
    Gemini API 키는 GAS 스크립트 속성에 서버 측으로 보관되며
@@ -1283,7 +1300,7 @@ function openGame(id){
   renderGameDetail(id);
   window.scrollTo({top:0,behavior:"smooth"});
 }
-$("#gBack").onclick=()=>{currentGameId=null;$("#gamesDetailView").style.display="none";$("#gamesListView").style.display="block";};
+$("#gBack").onclick=()=>{if(_qSaveTimer)flushQuarterSave();currentGameId=null;$("#gamesDetailView").style.display="none";$("#gamesListView").style.display="block";};
 
 async function saveGame(patch){
   if(!currentGameId)return;
@@ -1316,9 +1333,28 @@ function renderGameDetail(id){
 
 function pById(g,pid){return (g.participants||[]).find(p=>p.id===pid);}
 
+/* 이름 옆 팀 배정 버튼 (A/B/C). 현재 팀은 채워짐, 다시 누르면 대기로. C는 3팀 편성 때만. */
+function assignBtns(pid,zone,nTeams){
+  const list=[["team1","A"],["team2","B"]];
+  if(nTeams===3) list.push(["team3","C"]);
+  return `<span class="assign">${list.map(([tk,ltr])=>
+    `<button class="ab ab-${ltr.toLowerCase()} ${zone===tk?"on":""}" data-pid="${pid}" data-team="${tk}" title="${ltr}팀으로 (다시 누르면 대기)">${ltr}</button>`
+  ).join("")}</span>`;
+}
+async function assignToTeam(pid,teamKey){
+  const g=getGame(currentGameId); if(!g) return;
+  const f=readBoardFormation();
+  let cur="pool";
+  for(const z of TEAM_KEYS) if((f[z]||[]).includes(pid)) cur=z;
+  const target=(cur===teamKey)?"pool":teamKey;   // 같은 팀 다시 누르면 대기로 빼기
+  for(const z of TEAM_KEYS) f[z]=(f[z]||[]).filter(x=>x!==pid);
+  f[target]=[...(f[target]||[]),pid];
+  await saveGame({formation:f});
+}
 function renderTeamBoard(g){
   const board=$("#teamBoard");
-  const cols=["pool","team1","team2"]; if((g.numTeams||2)===3)cols.push("team3");
+  const nTeams=g.numTeams||2;
+  const cols=["pool","team1","team2"]; if(nTeams===3)cols.push("team3");
   const f=g.formation||{pool:[],team1:[],team2:[],team3:[]};
   // any participant not in formation -> pool
   const placed=new Set([...(f.pool||[]),...(f.team1||[]),...(f.team2||[]),...(f.team3||[])]);
@@ -1326,21 +1362,34 @@ function renderTeamBoard(g){
   const pool=[...(f.pool||[]),...orphans];
 
   const colData={pool,team1:f.team1||[],team2:f.team2||[],team3:f.team3||[]};
+  const LABEL={pool:"대기 명단",team1:"A팀",team2:"B팀",team3:"C팀"};
   board.innerHTML=cols.map(c=>{
     const ids=colData[c];
     const cls=c==="pool"?"col-pool":c==="team1"?"col-1":c==="team2"?"col-2":"col-3";
-    const chips=ids.map(pid=>{const p=pById(g,pid);return p?chipHTML(p):"";}).join("");
+    const chips=ids.map(pid=>{
+      const p=pById(g,pid); if(!p) return "";
+      const wr=winRateOf(p.id);
+      return `<div class="player-chip" data-pid="${p.id}">
+        <span class="pc-av ${p.gender}">${esc(genInitial(p.name))}</span>
+        <span class="pc-nm">${esc(p.name)}</span>
+        ${p.isGuest?`<span class="pc-guest">G</span>`:""}
+        ${wr!=null?`<span class="pc-wr">${wr}%</span>`:""}
+        ${assignBtns(p.id,c,nTeams)}
+      </div>`;
+    }).join("");
     return `<div class="team-col ${cls}">
-      <h4><span class="dot-c"></span>${TEAM_LABEL[c]}</h4>
+      <h4><span class="dot-c"></span>${LABEL[c]}</h4>
       <div class="tc-meta">${ids.length}명</div>
       <div class="dropzone" data-zone="${c}">${chips}</div>
     </div>`;
   }).join("");
-  // sortable
+  // sortable (A/B/C 버튼 클릭은 드래그로 안 잡히게 filter)
   $$(".dropzone",board).forEach(zone=>{
     new Sortable(zone,{group:"teams",animation:150,ghostClass:"sortable-ghost",chosenClass:"sortable-chosen",
+      filter:".ab",preventOnFilter:false,
       onEnd:()=>persistFormation(g.id)});
   });
+  $$(".ab",board).forEach(b=>b.onclick=e=>{ e.stopPropagation(); assignToTeam(b.dataset.pid,b.dataset.team); });
   renderLocalScore(g);   // 수동/자동 편성 모두 로컬 예상 스코어 즉시 표시
 }
 function readBoardFormation(){
@@ -1514,6 +1563,15 @@ function flushQuarterSave(){
   if(_qSaveTimer){ clearTimeout(_qSaveTimer); _qSaveTimer=null; }
   persistQuarters();
 }
+/* 팀 헤더 탭 → 해당 팀 점수 +1. 숫자 입력 값을 올리고 저장 경로 재사용(디바운스). */
+function bumpScore(qIdx, side){
+  const inp = side==="left" ? $(`#qsL-${qIdx}`) : $(`#qsR-${qIdx}`);
+  if(!inp) return;
+  const cur = inp.value===""?0:(parseInt(inp.value,10)||0);
+  inp.value = Math.max(0,cur)+1;
+  inp.classList.remove("bump"); void inp.offsetWidth; inp.classList.add("bump");   // 살짝 강조
+  scheduleQuarterSave();
+}
 function currentMatchupKey(q, f){
   if(!f) return "";
   const eq=(a,b)=>a.length===b.length&&a.every(x=>b.includes(x));
@@ -1546,7 +1604,7 @@ function renderQuarters(g){
   if(!qs.length){wrap.innerHTML=`<div style="color:var(--txt-faint);font-size:13px;padding:8px 0">아직 쿼터가 없습니다. 아래 버튼으로 추가하세요.</div>`;return;}
   const numTeams=g.numTeams||2;
   const f=g.formation||{};
-  const teamColor={1:"var(--blue)",2:"var(--rose)",3:"var(--teal)"};
+  const teamColor={1:"#f2f6fc",2:"var(--blue)",3:"#e2ff3d"};   // A 흰 / B 파랑 / C 노랑
   wrap.innerHTML=qs.map((q,i)=>{
     const side=(arr,zone)=>arr.map(pid=>{const p=pById(g,pid);return p?chipHTML(p,false):"";}).join("");
     const sl=q.scoreLeft, sr=q.scoreRight;
@@ -1571,7 +1629,7 @@ function renderQuarters(g){
       ${matchupRow}
       <div class="q-vs">
         <div class="q-side left">
-          <h5 style="color:${teamColor[Ln]}">● ${Ln}팀 (좌)</h5>
+          <h5 class="q-tap" data-q="${i}" data-side="left" style="color:${teamColor[Ln]}">● ${Ln}팀 (좌) <span class="tap-hint">탭 +1</span></h5>
           <div class="dropzone" data-q="${i}" data-side="left">${side(q.left||[])}</div>
         </div>
         <div class="q-score">
@@ -1580,7 +1638,7 @@ function renderQuarters(g){
           <input id="qsR-${i}" type="number" min="0" inputmode="numeric" value="${sr??""}" placeholder="0"/>
         </div>
         <div class="q-side right">
-          <h5 style="color:${teamColor[Rn]}">● ${Rn}팀 (우)</h5>
+          <h5 class="q-tap" data-q="${i}" data-side="right" style="color:${teamColor[Rn]}">● ${Rn}팀 (우) <span class="tap-hint">탭 +1</span></h5>
           <div class="dropzone" data-q="${i}" data-side="right">${side(q.right||[])}</div>
         </div>
       </div>
@@ -1603,6 +1661,8 @@ function renderQuarters(g){
     inp.addEventListener("input",scheduleQuarterSave);
     inp.addEventListener("blur",flushQuarterSave);
   });
+  // 팀 헤더 탭 → 해당 팀 점수 +1 (숫자 입력과 병행)
+  $$(".q-tap",wrap).forEach(el=>el.onclick=()=>bumpScore(+el.dataset.q, el.dataset.side));
 }
 
 /* ============================================================
